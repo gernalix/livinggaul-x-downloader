@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+*.tmp
+downloads/
+state/
+logs/
+*.sqlite
+*.sqlite-*

@@ -1,0 +1,657 @@
+#!/usr/bin/env python3
+# VERSION=0.1.3 prompt=392814 reusable LivingGaul X video downloader
+from __future__ import annotations
+
+import argparse
+import contextlib
+import datetime as dt
+import email.utils
+import hashlib
+import json
+import os
+import re
+import shutil
+import sqlite3
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+VERSION = "0.1.3"
+PROFILE_URL = "https://x.com/LivingGaul"
+SCREEN_NAME = "LivingGaul"
+DEFAULT_OUTPUT_DIR = Path.home() / "Videos" / "LivingGaul_X"
+DEFAULT_STATE_DIR = Path.home() / ".local" / "state" / "livinggaul-x-downloader"
+DEFAULT_DB_PATH = DEFAULT_STATE_DIR / "download_history.sqlite"
+DEFAULT_ARCHIVE = DEFAULT_STATE_DIR / "yt-dlp-download-archive.txt"
+DEFAULT_LOG_DIR = DEFAULT_STATE_DIR / "logs"
+YTDLP = str(Path.home() / ".local" / "bin" / "yt-dlp")
+FORMAT_480 = "bestvideo[height<=480]+bestaudio/best[height<=480]/best"
+TWEET_RE = re.compile(
+    r"(?:https?://(?:x|twitter)\.com/[^/\"'<>\s]+/status/)?(?P<id>\d{15,25})"
+)
+STATUS_HREF_RE = re.compile(
+    r"(?:https?:)?//(?:x|twitter)\.com/(?P<user>[A-Za-z0-9_]+)/status/(?P<id>\d{15,25})"
+    r"|href=[\"']/(?P<path_user>[A-Za-z0-9_]+)/status/(?P<path_id>\d{15,25})"
+)
+NITTER_INSTANCES = (
+    "https://xcancel.com",
+    "https://nitter.net",
+    "https://nitter.poast.org",
+    "https://nitter.privacydev.net",
+    "https://nitter.tiekoetter.com",
+)
+
+
+@dataclass(frozen=True)
+class Candidate:
+    tweet_id: str
+    url: str
+    published_at: str | None = None
+    source: str = "unknown"
+
+
+@dataclass
+class Summary:
+    posts_analyzed: int = 0
+    videos_found: int = 0
+    skipped_duplicate: int = 0
+    downloaded: int = 0
+    failed: int = 0
+    dry_run_matches: int = 0
+    skipped_previous_failed: int = 0
+
+
+def utc_now() -> str:
+    return dt.datetime.now(dt.UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def mkdirs(output_dir: Path, db_path: Path) -> None:
+    DEFAULT_STATE_DIR.mkdir(parents=True, exist_ok=True)
+    DEFAULT_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    DEFAULT_ARCHIVE.parent.mkdir(parents=True, exist_ok=True)
+    DEFAULT_ARCHIVE.touch(mode=0o600, exist_ok=True)
+    with contextlib.suppress(PermissionError):
+        os.chmod(DEFAULT_STATE_DIR, 0o700)
+        os.chmod(DEFAULT_LOG_DIR, 0o700)
+        os.chmod(db_path.parent, 0o700)
+
+
+def connect_db(db_path: Path) -> sqlite3.Connection:
+    con = sqlite3.connect(db_path)
+    con.row_factory = sqlite3.Row
+    con.execute("PRAGMA journal_mode=WAL")
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS downloads (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          original_url TEXT NOT NULL,
+          direct_video_url TEXT,
+          tweet_id TEXT,
+          published_at TEXT,
+          final_filename TEXT,
+          file_path TEXT,
+          sha256 TEXT,
+          size_bytes INTEGER,
+          quality TEXT,
+          status TEXT NOT NULL CHECK(status IN ('downloaded','skipped_duplicate','failed')),
+          error TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        )
+        """
+    )
+    con.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_downloads_original_url ON downloads(original_url)")
+    con.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_downloads_tweet_downloaded "
+        "ON downloads(tweet_id) WHERE tweet_id IS NOT NULL AND status='downloaded'"
+    )
+    con.execute(
+        "CREATE INDEX IF NOT EXISTS idx_downloads_status_updated ON downloads(status, updated_at)"
+    )
+    con.commit()
+    with contextlib.suppress(PermissionError):
+        os.chmod(db_path, 0o600)
+    return con
+
+
+def run(cmd: list[str], timeout: int = 180) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=timeout)
+
+
+def tool_path(name: str) -> str:
+    if name == "gallery-dl":
+        venv_gallery_dl = Path.home() / ".local" / "share" / "livinggaul-x-downloader-venv" / "bin" / "gallery-dl"
+        if venv_gallery_dl.exists():
+            return str(venv_gallery_dl)
+    if name == "yt-dlp" and Path(YTDLP).exists():
+        return YTDLP
+    found = shutil.which(name)
+    if not found:
+        raise SystemExit(f"ERROR: required tool not found: {name}")
+    return found
+
+
+def log_path() -> Path:
+    stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    return DEFAULT_LOG_DIR / f"run-{stamp}.log"
+
+
+def log(message: str, logfile: Path | None) -> None:
+    line = f"[{utc_now()}] {message}"
+    print(line, file=sys.stderr)
+    if logfile:
+        logfile.parent.mkdir(parents=True, exist_ok=True)
+        with logfile.open("a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+
+
+def browser_cookie_args(mode: str, firefox_profile: str | None = None) -> list[str]:
+    if mode in {"none", "manual"}:
+        return []
+    if mode not in {"auto", "firefox"}:
+        raise SystemExit("ERROR: --cookies-mode must be auto, firefox, manual, or none")
+    if firefox_profile:
+        return ["--cookies-from-browser", f"firefox:{firefox_profile}"]
+    return ["--cookies-from-browser", "firefox"]
+
+
+def http_get(url: str, timeout: int = 25) -> str:
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:151.0) Gecko/20100101 Firefox/151.0",
+            "Accept": "text/html,application/rss+xml,application/xml;q=0.9,*/*;q=0.8",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as response:
+        data = response.read(3_000_000)
+        charset = response.headers.get_content_charset() or "utf-8"
+    return data.decode(charset, errors="replace")
+
+
+def canonical_candidate(tweet_id: str, source: str, published_at: str | None = None) -> Candidate:
+    return Candidate(
+        tweet_id=tweet_id,
+        url=f"https://x.com/{SCREEN_NAME}/status/{tweet_id}",
+        published_at=published_at,
+        source=source,
+    )
+
+
+def add_candidate(out: dict[str, Candidate], tweet_id: str | None, source: str, published_at: str | None = None) -> None:
+    if not tweet_id:
+        return
+    if not re.fullmatch(r"\d{15,25}", tweet_id):
+        return
+    out.setdefault(tweet_id, canonical_candidate(tweet_id, source, published_at))
+
+
+def parse_status_ids(text: str, source: str) -> dict[str, Candidate]:
+    out: dict[str, Candidate] = {}
+    for match in STATUS_HREF_RE.finditer(text):
+        user = match.group("user") or match.group("path_user")
+        tweet_id = match.group("id") or match.group("path_id")
+        if user and user.lower() == SCREEN_NAME.lower():
+            add_candidate(out, tweet_id, source)
+    return out
+
+
+def parse_rss(text: str, source: str) -> dict[str, Candidate]:
+    out: dict[str, Candidate] = {}
+    item_re = re.compile(r"<item\b.*?</item>", re.IGNORECASE | re.DOTALL)
+    link_re = re.compile(r"<link>(.*?)</link>", re.IGNORECASE | re.DOTALL)
+    date_re = re.compile(r"<pubDate>(.*?)</pubDate>", re.IGNORECASE | re.DOTALL)
+    for item in item_re.findall(text):
+        link = link_re.search(item)
+        date = date_re.search(item)
+        if not link:
+            continue
+        ids = TWEET_RE.findall(link.group(1))
+        published_at = None
+        if date:
+            with contextlib.suppress(Exception):
+                published_at = email.utils.parsedate_to_datetime(date.group(1)).astimezone(dt.UTC).isoformat().replace("+00:00", "Z")
+        for tweet_id in ids:
+            add_candidate(out, tweet_id, source, published_at)
+    return out
+
+
+def discover_from_public_web(logfile: Path | None) -> list[Candidate]:
+    candidates: dict[str, Candidate] = {}
+    urls = [PROFILE_URL, f"https://x.com/search?q=from%3A{SCREEN_NAME}%20filter%3Anative_video&src=typed_query&f=live"]
+    for url in urls:
+        try:
+            html = http_get(url)
+            candidates.update(parse_status_ids(html, f"x-html:{url}"))
+            log(f"discovery x-html url={url} candidates={len(candidates)}", logfile)
+        except Exception as exc:
+            log(f"discovery x-html failed url={url} error={exc}", logfile)
+    for base in NITTER_INSTANCES:
+        for suffix in (f"/{SCREEN_NAME}/rss", f"/{SCREEN_NAME}/with_replies", f"/search?f=tweets&q=from%3A{SCREEN_NAME}%20filter%3Anative_video"):
+            url = base + suffix
+            try:
+                text = http_get(url)
+                parsed = parse_rss(text, f"rss:{url}") if suffix.endswith("/rss") else parse_status_ids(text, f"html:{url}")
+                candidates.update(parsed)
+                log(f"discovery nitter url={url} added={len(parsed)} total={len(candidates)}", logfile)
+                if candidates:
+                    break
+            except Exception as exc:
+                log(f"discovery nitter failed url={url} error={exc}", logfile)
+        if candidates:
+            break
+    return sorted(candidates.values(), key=lambda c: int(c.tweet_id), reverse=True)
+
+
+def discover_from_gallery_dl(args: argparse.Namespace, logfile: Path | None) -> list[Candidate]:
+    try:
+        gallery_dl = tool_path("gallery-dl")
+    except SystemExit:
+        log("discovery gallery-dl unavailable", logfile)
+        return []
+    cmd = [gallery_dl, "-j", "--range", "1-999999"]
+    if args.cookies_mode in {"auto", "firefox"}:
+        if args.firefox_profile:
+            cmd.extend(["--cookies-from-browser", f"firefox:{args.firefox_profile}"])
+        else:
+            cmd.extend(["--cookies-from-browser", "firefox"])
+    cmd.append(PROFILE_URL)
+    log("discovery gallery-dl start", logfile)
+    try:
+        result = run(cmd, timeout=420)
+    except subprocess.TimeoutExpired as exc:
+        log(f"discovery gallery-dl timeout error={exc}", logfile)
+        return []
+    if result.returncode != 0:
+        log(f"discovery gallery-dl failed error={(result.stderr or result.stdout).strip()[-1000:]}", logfile)
+    candidates: dict[str, Candidate] = {}
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if not line or not line.startswith("["):
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        text = json.dumps(payload, ensure_ascii=True)
+        for tweet_id in TWEET_RE.findall(text):
+            add_candidate(candidates, tweet_id, "gallery-dl")
+    log(f"discovery gallery-dl candidates={len(candidates)}", logfile)
+    return sorted(candidates.values(), key=lambda c: int(c.tweet_id), reverse=True)
+
+
+def candidates_from_url_file(path: Path) -> list[Candidate]:
+    candidates: dict[str, Candidate] = {}
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        match = TWEET_RE.search(line)
+        if match:
+            add_candidate(candidates, match.group("id"), f"url-file:{path}")
+    return sorted(candidates.values(), key=lambda c: int(c.tweet_id), reverse=True)
+
+
+def already_downloaded(con: sqlite3.Connection, candidate: Candidate) -> sqlite3.Row | None:
+    row = con.execute(
+        """
+        SELECT * FROM downloads
+        WHERE status='downloaded'
+          AND ((tweet_id IS NOT NULL AND tweet_id=?) OR original_url=?)
+        ORDER BY updated_at DESC
+        LIMIT 1
+        """,
+        (candidate.tweet_id, candidate.url),
+    ).fetchone()
+    if not row:
+        return None
+    file_path = row["file_path"]
+    if file_path and Path(file_path).exists():
+        return row
+    return None
+
+
+def previous_failed(con: sqlite3.Connection, candidate: Candidate) -> sqlite3.Row | None:
+    return con.execute(
+        """
+        SELECT * FROM downloads
+        WHERE status='failed'
+          AND ((tweet_id IS NOT NULL AND tweet_id=?) OR original_url=?)
+        ORDER BY updated_at DESC
+        LIMIT 1
+        """,
+        (candidate.tweet_id, candidate.url),
+    ).fetchone()
+
+
+def upsert_status(
+    con: sqlite3.Connection,
+    candidate: Candidate,
+    status: str,
+    *,
+    direct_video_url: str | None = None,
+    final_filename: str | None = None,
+    file_path: str | None = None,
+    sha256: str | None = None,
+    size_bytes: int | None = None,
+    quality: str | None = None,
+    error: str | None = None,
+) -> None:
+    now = utc_now()
+    con.execute(
+        """
+        INSERT INTO downloads (
+          original_url, direct_video_url, tweet_id, published_at, final_filename, file_path,
+          sha256, size_bytes, quality, status, error, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(original_url) DO UPDATE SET
+          direct_video_url=excluded.direct_video_url,
+          tweet_id=excluded.tweet_id,
+          published_at=COALESCE(excluded.published_at, downloads.published_at),
+          final_filename=excluded.final_filename,
+          file_path=excluded.file_path,
+          sha256=excluded.sha256,
+          size_bytes=excluded.size_bytes,
+          quality=excluded.quality,
+          status=excluded.status,
+          error=excluded.error,
+          updated_at=excluded.updated_at
+        """,
+        (
+            candidate.url,
+            direct_video_url,
+            candidate.tweet_id,
+            candidate.published_at,
+            final_filename,
+            file_path,
+            sha256,
+            size_bytes,
+            quality,
+            status,
+            error,
+            now,
+            now,
+        ),
+    )
+    con.commit()
+
+
+def ytdlp_base_args(args: argparse.Namespace) -> list[str]:
+    cmd = [tool_path("yt-dlp"), "--no-playlist", "--retries", "5", "--fragment-retries", "5", "--sleep-requests", "1"]
+    cmd.extend(browser_cookie_args(args.cookies_mode, args.firefox_profile))
+    return cmd
+
+
+def extract_metadata(args: argparse.Namespace, candidate: Candidate, logfile: Path | None) -> dict[str, Any]:
+    modes: list[tuple[str, list[str]]] = [("selected", browser_cookie_args(args.cookies_mode, args.firefox_profile))]
+    if args.cookies_mode == "auto":
+        modes = [("none", []), ("firefox", browser_cookie_args("firefox", args.firefox_profile))]
+    last_error = ""
+    for label, cookie_args in modes:
+        cmd = [tool_path("yt-dlp"), "--dump-single-json", "--no-playlist", "--no-warnings", *cookie_args, candidate.url]
+        log(f"metadata tweet_id={candidate.tweet_id} mode={label}", logfile)
+        try:
+            result = run(cmd, timeout=150)
+        except subprocess.TimeoutExpired as exc:
+            last_error = f"metadata timeout: {exc}"
+            continue
+        if result.returncode == 0 and result.stdout.strip():
+            return json.loads(result.stdout)
+        last_error = (result.stderr or result.stdout).strip()[-1200:]
+    raise RuntimeError(last_error or "yt-dlp returned no metadata")
+
+
+def metadata_has_video(meta: dict[str, Any]) -> bool:
+    formats = meta.get("formats") or []
+    if any((f.get("vcodec") or "none") != "none" for f in formats):
+        return True
+    return bool(meta.get("url") and meta.get("ext") in {"mp4", "webm", "mkv", "mov"})
+
+
+def stable_title(meta: dict[str, Any], candidate: Candidate) -> str:
+    published = candidate.published_at or meta.get("upload_date") or meta.get("timestamp")
+    if isinstance(published, int | float):
+        prefix = dt.datetime.fromtimestamp(published, dt.UTC).strftime("%Y-%m-%d")
+    elif isinstance(published, str) and re.fullmatch(r"\d{8}", published):
+        prefix = f"{published[:4]}-{published[4:6]}-{published[6:8]}"
+    elif isinstance(published, str) and re.match(r"\d{4}-\d{2}-\d{2}", published):
+        prefix = published[:10]
+    else:
+        prefix = "unknown-date"
+    title = meta.get("title") or meta.get("description") or "LivingGaul X video"
+    title = re.sub(r"https?://\S+", "", str(title))
+    title = re.sub(r"[^A-Za-z0-9._ -]+", " ", title)
+    title = re.sub(r"\s+", " ", title).strip(" ._-")
+    if not title or title.lower() in {"twitter", "x"}:
+        title = "LivingGaul X video"
+    title = title[:90].strip()
+    return f"{prefix} - {candidate.tweet_id} - {title}"
+
+
+def newest_output_file(output_dir: Path, before: set[Path]) -> Path | None:
+    candidates = [p for p in output_dir.glob("*") if p.is_file() and p not in before and not p.name.endswith((".part", ".ytdl"))]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda p: p.stat().st_mtime)
+
+
+def ffprobe_height(path: Path) -> int | None:
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        return None
+    result = run(
+        [ffprobe, "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=height", "-of", "csv=p=0", str(path)],
+        timeout=60,
+    )
+    if result.returncode != 0:
+        return None
+    with contextlib.suppress(ValueError):
+        return int(result.stdout.strip().splitlines()[0])
+    return None
+
+
+def ensure_max_480(path: Path, logfile: Path | None) -> tuple[Path, str]:
+    height = ffprobe_height(path)
+    if height is None:
+        return path, "480p-or-unknown"
+    if height <= 480:
+        return path, f"{height}p"
+    ffmpeg = tool_path("ffmpeg")
+    tmp = path.with_suffix(f".480p.tmp{path.suffix}")
+    result = run(
+        [ffmpeg, "-y", "-i", str(path), "-vf", "scale=-2:480", "-c:v", "libx264", "-crf", "23", "-preset", "veryfast", "-c:a", "copy", str(tmp)],
+        timeout=1800,
+    )
+    if result.returncode != 0:
+        raise RuntimeError("ffmpeg downscale failed: " + result.stderr[-1200:])
+    tmp.replace(path)
+    log(f"downscaled file={path} from_height={height} target=480p", logfile)
+    return path, "480p-downscaled"
+
+
+def sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def download_one(args: argparse.Namespace, con: sqlite3.Connection, candidate: Candidate, logfile: Path | None, summary: Summary) -> None:
+    summary.posts_analyzed += 1
+    row = already_downloaded(con, candidate)
+    if row:
+        summary.skipped_duplicate += 1
+        log(f"skip downloaded tweet_id={candidate.tweet_id} file={row['file_path']}", logfile)
+        return
+    failed_row = previous_failed(con, candidate)
+    if failed_row and not args.retry_failed:
+        summary.skipped_previous_failed += 1
+        log(f"skip previous_failed tweet_id={candidate.tweet_id} use --retry-failed to retry", logfile)
+        return
+    try:
+        meta = extract_metadata(args, candidate, logfile)
+        if not metadata_has_video(meta):
+            raise RuntimeError("no video formats found")
+        summary.videos_found += 1
+        direct = meta.get("url")
+        title = stable_title(meta, candidate)
+        if args.dry_run:
+            summary.dry_run_matches += 1
+            print(f"DRY-RUN would download: {candidate.url} -> {title}.%(ext)s")
+            return
+        before = {p for p in args.output_dir.glob("*") if p.is_file()}
+        outtmpl = str(args.output_dir / f"{title}.%(ext)s")
+        cmd = [
+            *ytdlp_base_args(args),
+            "--format",
+            FORMAT_480,
+            "--merge-output-format",
+            "mp4",
+            "--download-archive",
+            str(DEFAULT_ARCHIVE),
+            "--continue",
+            "--no-overwrites",
+            "--output",
+            outtmpl,
+            candidate.url,
+        ]
+        log(f"download tweet_id={candidate.tweet_id}", logfile)
+        result = run(cmd, timeout=3600)
+        if result.returncode != 0:
+            raise RuntimeError((result.stderr or result.stdout).strip()[-1600:])
+        final = newest_output_file(args.output_dir, before)
+        if final is None:
+            possible = sorted(args.output_dir.glob(f"*{candidate.tweet_id}*"), key=lambda p: p.stat().st_mtime if p.is_file() else 0, reverse=True)
+            final = possible[0] if possible else None
+        if final is None or not final.exists():
+            raise RuntimeError("download completed but final file was not found")
+        final, quality = ensure_max_480(final, logfile)
+        upsert_status(
+            con,
+            candidate,
+            "downloaded",
+            direct_video_url=direct,
+            final_filename=final.name,
+            file_path=str(final),
+            sha256=sha256_file(final),
+            size_bytes=final.stat().st_size,
+            quality=quality,
+            error=None,
+        )
+        summary.downloaded += 1
+        log(f"downloaded tweet_id={candidate.tweet_id} file={final}", logfile)
+    except Exception as exc:
+        if not args.dry_run:
+            upsert_status(con, candidate, "failed", error=str(exc))
+        summary.failed += 1
+        log(f"failed tweet_id={candidate.tweet_id} error={exc}", logfile)
+
+
+def retry_failed_candidates(con: sqlite3.Connection) -> list[Candidate]:
+    rows = con.execute(
+        "SELECT original_url, tweet_id, published_at FROM downloads WHERE status='failed' ORDER BY updated_at"
+    ).fetchall()
+    out = []
+    for row in rows:
+        tweet_id = row["tweet_id"] or (TWEET_RE.search(row["original_url"]).group("id") if TWEET_RE.search(row["original_url"]) else None)
+        if tweet_id:
+            out.append(Candidate(tweet_id=tweet_id, url=row["original_url"], published_at=row["published_at"], source="retry-failed"))
+    return out
+
+
+def print_status(con: sqlite3.Connection, output_dir: Path, db_path: Path) -> None:
+    counts = {row["status"]: row["n"] for row in con.execute("SELECT status, COUNT(*) n FROM downloads GROUP BY status")}
+    size = sum(p.stat().st_size for p in output_dir.glob("**/*") if p.is_file()) if output_dir.exists() else 0
+    print(f"version: {VERSION}")
+    print(f"db: {db_path}")
+    print(f"output_dir: {output_dir}")
+    print(f"archive: {DEFAULT_ARCHIVE}")
+    print(f"downloaded: {counts.get('downloaded', 0)}")
+    print(f"skipped_duplicate: {counts.get('skipped_duplicate', 0)}")
+    print(f"failed: {counts.get('failed', 0)}")
+    print(f"output_size_bytes: {size}")
+
+
+def list_failed(con: sqlite3.Connection) -> None:
+    rows = con.execute(
+        "SELECT updated_at, tweet_id, original_url, error FROM downloads WHERE status='failed' ORDER BY updated_at DESC"
+    ).fetchall()
+    for row in rows:
+        print(f"{row['updated_at']} tweet_id={row['tweet_id']} url={row['original_url']} error={row['error']}")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Download LivingGaul X videos at max 480p with SQLite history.")
+    action = parser.add_mutually_exclusive_group(required=True)
+    action.add_argument("--run", action="store_true", help="discover and download new videos")
+    action.add_argument("--dry-run", action="store_true", help="discover and show videos without downloading")
+    action.add_argument("--status", action="store_true", help="show DB and output summary")
+    action.add_argument("--list-failed", action="store_true", help="list failed DB rows")
+    action.add_argument("--retry-failed", action="store_true", help="retry only failed rows")
+    parser.add_argument("--cookies-mode", choices=["auto", "firefox", "manual", "none"], default="auto")
+    parser.add_argument("--firefox-profile", help="optional Firefox profile path/name for yt-dlp cookies")
+    parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
+    parser.add_argument("--db-path", type=Path, default=DEFAULT_DB_PATH)
+    parser.add_argument("--url-file", type=Path, help="optional file with X post URLs, one per line")
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    mkdirs(args.output_dir, args.db_path)
+    logfile = log_path()
+    con = connect_db(args.db_path)
+    if args.status:
+        print_status(con, args.output_dir, args.db_path)
+        return 0
+    if args.list_failed:
+        list_failed(con)
+        return 0
+    if args.cookies_mode == "manual":
+        print("Manual login mode: open Firefox, log in to X, then rerun with --cookies-mode firefox or auto.", file=sys.stderr)
+        return 2
+    if args.retry_failed:
+        candidates = retry_failed_candidates(con)
+    else:
+        candidates = []
+        if args.url_file:
+            candidates.extend(candidates_from_url_file(args.url_file))
+        discovered = discover_from_gallery_dl(args, logfile)
+        if not discovered:
+            discovered = discover_from_public_web(logfile)
+        seen = {c.tweet_id for c in candidates}
+        candidates.extend(c for c in discovered if c.tweet_id not in seen)
+    summary = Summary()
+    log(f"start version={VERSION} candidates={len(candidates)} output={args.output_dir} db={args.db_path}", logfile)
+    if not candidates:
+        log("no post candidates discovered; X/Nitter may be access-limited, use --url-file after manual browser discovery", logfile)
+    for candidate in candidates:
+        download_one(args, con, candidate, logfile, summary)
+        time.sleep(1)
+    size = sum(p.stat().st_size for p in args.output_dir.glob("**/*") if p.is_file()) if args.output_dir.exists() else 0
+    print("Final report")
+    print(f"tweet/post analyzed: {summary.posts_analyzed}")
+    print(f"videos found: {summary.videos_found}")
+    print(f"already present skipped: {summary.skipped_duplicate}")
+    print(f"previous failures skipped: {summary.skipped_previous_failed}")
+    print(f"new videos downloaded: {summary.downloaded}")
+    print(f"errors: {summary.failed}")
+    print(f"space used bytes: {size}")
+    print(f"db path: {args.db_path}")
+    print(f"video path: {args.output_dir}")
+    print(f"log path: {logfile}")
+    print("future rerun: livinggaul-x-downloader --run")
+    return 0 if summary.failed == 0 else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
