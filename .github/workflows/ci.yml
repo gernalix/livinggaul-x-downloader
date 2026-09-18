@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+    paths-ignore:
+      - '**/*.md'
+      - 'reports/**'
+  pull_request:
+    paths-ignore:
+      - '**/*.md'
+      - 'reports/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: livinggaul-x-downloader-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Compile downloader
+        run: python -m py_compile livinggaul-x-downloader
+      - name: CLI smoke test
+        run: python livinggaul-x-downloader --help >/dev/null
