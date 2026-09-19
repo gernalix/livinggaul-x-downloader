@@ -106,6 +106,8 @@ class ContentDedupeTests(unittest.TestCase):
             tables = {row[0] for row in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             self.assertIn("metadata_snapshots", tables)
             self.assertEqual(con.execute("PRAGMA user_version").fetchone()[0], 3)
+            views = {row[0] for row in con.execute("SELECT name FROM sqlite_master WHERE type='view'")}
+            self.assertIn("video_catalog", views)
             con.close()
 
     def test_upsert_persists_normalized_and_raw_metadata_once(self):
@@ -156,6 +158,53 @@ class ContentDedupeTests(unittest.TestCase):
             upsert_status(con, candidate, "downloaded", source_metadata={"view_count": 999})
             self.assertEqual(con.execute("SELECT view_count FROM downloads").fetchone()[0], 42)
             self.assertEqual(con.execute("SELECT COUNT(*) FROM metadata_snapshots").fetchone()[0], 1)
+            con.close()
+
+    def test_video_catalog_exposes_readable_sizes_and_daily_grouping(self):
+        connect_db = MODULE["connect_db"]
+        Candidate = MODULE["Candidate"]
+        upsert_status = MODULE["upsert_status"]
+        with tempfile.TemporaryDirectory() as tmp:
+            con = connect_db(Path(tmp) / "history.sqlite")
+            rows = [
+                ("1234567890123456781", "2026-09-18T10:00:00Z", 1_500_000),
+                ("1234567890123456782", "2026-09-18T12:00:00Z", 500_000),
+                ("1234567890123456783", "2026-09-19T09:00:00Z", 3_000_000),
+            ]
+            for tweet_id, downloaded_at, size_bytes in rows:
+                candidate = Candidate(
+                    tweet_id=tweet_id,
+                    url=f"https://x.com/LivingGaul/status/{tweet_id}",
+                )
+                upsert_status(
+                    con,
+                    candidate,
+                    "downloaded",
+                    size_bytes=size_bytes,
+                    downloaded_at=downloaded_at,
+                    source_metadata={"title": f"video {tweet_id}"},
+                )
+
+            catalog = con.execute(
+                "SELECT download_date, size_mb, size_mib FROM video_catalog ORDER BY id LIMIT 1"
+            ).fetchone()
+            self.assertEqual(catalog["download_date"], "2026-09-18")
+            self.assertAlmostEqual(catalog["size_mb"], 1.5)
+            self.assertAlmostEqual(catalog["size_mib"], 1_500_000 / 1_048_576)
+
+            daily = con.execute(
+                """
+                SELECT download_date, COUNT(*) AS videos, ROUND(SUM(size_mb), 3) AS total_mb
+                FROM video_catalog
+                WHERE status='downloaded'
+                GROUP BY download_date
+                ORDER BY download_date
+                """
+            ).fetchall()
+            self.assertEqual(
+                [(row["download_date"], row["videos"], row["total_mb"]) for row in daily],
+                [("2026-09-18", 2, 2.0), ("2026-09-19", 1, 3.0)],
+            )
             con.close()
 
 

@@ -1,10 +1,10 @@
-META=project=livinggaul-x-downloader;version=0.3.0;prompt=392814
+META=project=livinggaul-x-downloader;version=0.3.1;prompt=392814
 PURPOSE=reusable_host_cli_downloads_LivingGaul_X_videos_max_480p
 STACK=python3,yt-dlp,gallery-dl_user_venv,ffmpeg,ffprobe,sqlite3
 ENTRYPOINT=script livinggaul-x-downloader installed globally at ~/.local/bin/livinggaul-x-downloader
 OUTPUT=videos at ~/Videos/LivingGaul_X
 STATE=~/.local/state/livinggaul-x-downloader
-DB=~/.local/state/livinggaul-x-downloader/download_history.sqlite; schema_v3 stores normalized X/social/file metadata plus immutable raw yt-dlp JSON snapshots
+DB=~/.local/state/livinggaul-x-downloader/download_history.sqlite; schema_v3 stores normalized X/social/file metadata plus immutable raw yt-dlp JSON snapshots; video_catalog view exposes readable derived fields including download_date,size_mb,size_mib,duration_seconds,resolution,fps,kbps
 ARCHIVE=~/.local/state/livinggaul-x-downloader/yt-dlp-download-archive.txt
 LOGS=~/.local/state/livinggaul-x-downloader/logs
 AUTH=cookies_mode auto tries no_login then yt-dlp cookies-from-browser firefox; manual mode requests browser login without storing secrets
@@ -13,5 +13,5 @@ IDEMPOTENCE=SQLite+yt-dlp_archive; cross-post content dedupe uses stable video.t
 DISCOVERY=gallery-dl_X_timeline_with_firefox_cookies,public_X_HTML,Nitter_RSS_HTML,optional_url_file; X/Nitter access limits are logged explicitly
 CLI=--run,--dry-run,--status,--list-failed,--retry-failed,--reindex-content,--cookies-mode,--output-dir,--db-path,--url-file; reindex-content also backfills ffprobe metadata
 SECURITY=no_passwords_or_tokens_saved; browser cookies passed only to yt-dlp
-TEST=py_compile,CLI_help,unittest_schema_v3_metadata_mapping_raw_snapshot_media_key_and_fingerprint; local_reindex_and_live_X_smoke_require_host_state
+TEST=py_compile,CLI_help,unittest_schema_v3_metadata_mapping_raw_snapshot_media_key_fingerprint_and_video_catalog_daily_groupby; local_reindex_and_live_X_smoke_require_host_state
 RISK=X_profile_discovery_can_be_blocked_or_empty; use --url-file after manual browser discovery if needed
