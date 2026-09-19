@@ -43,7 +43,7 @@ The downloader still deduplicates through SQLite and the yt-dlp archive.
 
 ## Content deduplication
 
-Version 0.4.1 also deduplicates videos independently of the X post URL:
+Version 0.4.2 also deduplicates videos independently of the X post URL:
 
 - before download it extracts a stable key from `video.twimg.com` asset URLs when available;
 - after download it checks SHA-256 for byte-identical files;
@@ -55,7 +55,7 @@ File size is stored as metadata but is not treated as a unique identifier.
 
 ## Metadata catalog
 
-Version 0.4.1 expands the SQLite history into a metadata catalog. Each processed X video can store:
+Version 0.4.2 expands the SQLite history into a metadata catalog. Each processed X video can store:
 
 - X/yt-dlp metadata: uploader, uploader id, post text, title, publication/upload time, and one static snapshot of views, likes, reposts, and comments when exposed by X;
 - final-file metadata from `ffprobe`: width, height, exact FPS numerator/denominator, video/audio codecs and bitrates, container, pixel format, sample rate, channels, duration, and size;
@@ -73,6 +73,7 @@ The database also exposes a `video_catalog` view. It keeps the normalized metada
 - `size_mib` using binary MiB (1 MiB = 1,048,576 bytes);
 - `duration_seconds`, `duration_minutes`, `resolution`, `fps`;
 - video/audio bitrate in kbps;
+- `duplicate_count`, the number of duplicate X posts/videos that were detected and ignored in favor of that canonical downloaded file;
 - the raw yt-dlp JSON snapshot.
 
 Example: downloaded storage per day:
@@ -90,9 +91,20 @@ ORDER BY download_date;
 
 Because `download_date` falls back to the row creation date when an older row has no explicit `downloaded_at`, migrated historical rows remain groupable.
 
+Duplicate counts are derived from the persistent `skipped_duplicate` rows linked through `duplicate_of_id`, so they stay consistent with the deduplication history without maintaining a second counter. Example:
+
+```sql
+SELECT
+  final_filename,
+  duplicate_count
+FROM video_catalog
+WHERE status = 'downloaded'
+ORDER BY duplicate_count DESC;
+```
+
 ### Source availability percentage
 
-Version 0.4.1 can also check whether the original X link for each already-downloaded video still exposes a downloadable video:
+Version 0.4.2 can also check whether the original X link for each already-downloaded video still exposes a downloadable video:
 
 ```bash
 livinggaul-x-downloader --check-source-availability
@@ -144,7 +156,7 @@ journalctl --user -u livinggaul-x-source-availability.service
 
 ## Versioning
 
-- Current version: `0.4.1`
+- Current version: `0.4.2`
 - Prompt: `#392814`
 - Script first line keeps the version marker.
 

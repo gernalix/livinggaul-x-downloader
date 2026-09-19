@@ -324,6 +324,50 @@ class ContentDedupeTests(unittest.TestCase):
             self.assertEqual(seen, [ids[2], ids[1], ids[0]])
             con.close()
 
+    def test_video_catalog_counts_ignored_duplicates_per_canonical_video(self):
+        connect_db = MODULE["connect_db"]
+        Candidate = MODULE["Candidate"]
+        upsert_status = MODULE["upsert_status"]
+        with tempfile.TemporaryDirectory() as tmp:
+            con = connect_db(Path(tmp) / "history.sqlite")
+            canonical_id = "1234567890123457001"
+            canonical = Candidate(
+                tweet_id=canonical_id,
+                url=f"https://x.com/LivingGaul/status/{canonical_id}",
+            )
+            upsert_status(con, canonical, "downloaded", size_bytes=1_000_000)
+            canonical_row = con.execute(
+                "SELECT id FROM downloads WHERE tweet_id=?", (canonical_id,)
+            ).fetchone()
+            self.assertIsNotNone(canonical_row)
+
+            for suffix in ("02", "03"):
+                tweet_id = f"12345678901234570{suffix}"
+                upsert_status(
+                    con,
+                    Candidate(tweet_id=tweet_id, url=f"https://x.com/LivingGaul/status/{tweet_id}"),
+                    "skipped_duplicate",
+                    duplicate_of_id=canonical_row["id"],
+                    size_bytes=1_000_000,
+                )
+
+            row = con.execute(
+                "SELECT duplicate_count FROM video_catalog WHERE id=?",
+                (canonical_row["id"],),
+            ).fetchone()
+            self.assertEqual(row["duplicate_count"], 2)
+
+            duplicate_rows = con.execute(
+                """
+                SELECT duplicate_count
+                FROM video_catalog
+                WHERE status='skipped_duplicate'
+                ORDER BY id
+                """
+            ).fetchall()
+            self.assertEqual([r["duplicate_count"] for r in duplicate_rows], [0, 0])
+            con.close()
+
 
 if __name__ == "__main__":
     unittest.main()
