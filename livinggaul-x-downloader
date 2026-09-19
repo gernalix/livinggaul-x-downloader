@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# VERSION=0.2.0 prompt=392814 reusable LivingGaul X video downloader
+# VERSION=0.3.0 prompt=392814 reusable LivingGaul X video downloader
 from __future__ import annotations
 
 import argparse
@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 PROFILE_URL = "https://x.com/LivingGaul"
 SCREEN_NAME = "LivingGaul"
 DEFAULT_OUTPUT_DIR = Path.home() / "Videos" / "LivingGaul_X"
@@ -93,6 +93,7 @@ def mkdirs(output_dir: Path, db_path: Path) -> None:
 def connect_db(db_path: Path) -> sqlite3.Connection:
     con = sqlite3.connect(db_path)
     con.row_factory = sqlite3.Row
+    con.execute("PRAGMA foreign_keys=ON")
     con.execute("PRAGMA journal_mode=WAL")
     con.execute(
         """
@@ -101,20 +102,43 @@ def connect_db(db_path: Path) -> sqlite3.Connection:
           original_url TEXT NOT NULL,
           direct_video_url TEXT,
           tweet_id TEXT,
+          uploader TEXT,
+          uploader_id TEXT,
+          tweet_text TEXT,
+          title TEXT,
           published_at TEXT,
+          upload_timestamp INTEGER,
+          downloaded_at TEXT,
+          view_count INTEGER CHECK(view_count IS NULL OR view_count >= 0),
+          like_count INTEGER CHECK(like_count IS NULL OR like_count >= 0),
+          repost_count INTEGER CHECK(repost_count IS NULL OR repost_count >= 0),
+          comment_count INTEGER CHECK(comment_count IS NULL OR comment_count >= 0),
           final_filename TEXT,
           file_path TEXT,
           sha256 TEXT,
-          size_bytes INTEGER,
+          size_bytes INTEGER CHECK(size_bytes IS NULL OR size_bytes >= 0),
           media_key TEXT,
           content_fingerprint TEXT,
-          duration_ms INTEGER,
+          duration_ms INTEGER CHECK(duration_ms IS NULL OR duration_ms >= 0),
           duplicate_of_id INTEGER,
+          width INTEGER CHECK(width IS NULL OR width > 0),
+          height INTEGER CHECK(height IS NULL OR height > 0),
+          fps_num INTEGER CHECK(fps_num IS NULL OR fps_num >= 0),
+          fps_den INTEGER CHECK(fps_den IS NULL OR fps_den > 0),
+          video_codec TEXT,
+          audio_codec TEXT,
+          video_bitrate INTEGER CHECK(video_bitrate IS NULL OR video_bitrate >= 0),
+          audio_bitrate INTEGER CHECK(audio_bitrate IS NULL OR audio_bitrate >= 0),
+          container_format TEXT,
+          pixel_format TEXT,
+          audio_sample_rate INTEGER CHECK(audio_sample_rate IS NULL OR audio_sample_rate > 0),
+          audio_channels INTEGER CHECK(audio_channels IS NULL OR audio_channels > 0),
           quality TEXT,
           status TEXT NOT NULL CHECK(status IN ('downloaded','skipped_duplicate','failed')),
           error TEXT,
           created_at TEXT NOT NULL,
-          updated_at TEXT NOT NULL
+          updated_at TEXT NOT NULL,
+          FOREIGN KEY(duplicate_of_id) REFERENCES downloads(id) ON DELETE SET NULL
         )
         """
     )
@@ -124,10 +148,46 @@ def connect_db(db_path: Path) -> sqlite3.Connection:
         "content_fingerprint": "TEXT",
         "duration_ms": "INTEGER",
         "duplicate_of_id": "INTEGER",
+        "uploader": "TEXT",
+        "uploader_id": "TEXT",
+        "tweet_text": "TEXT",
+        "title": "TEXT",
+        "upload_timestamp": "INTEGER",
+        "downloaded_at": "TEXT",
+        "view_count": "INTEGER",
+        "like_count": "INTEGER",
+        "repost_count": "INTEGER",
+        "comment_count": "INTEGER",
+        "width": "INTEGER",
+        "height": "INTEGER",
+        "fps_num": "INTEGER",
+        "fps_den": "INTEGER",
+        "video_codec": "TEXT",
+        "audio_codec": "TEXT",
+        "video_bitrate": "INTEGER",
+        "audio_bitrate": "INTEGER",
+        "container_format": "TEXT",
+        "pixel_format": "TEXT",
+        "audio_sample_rate": "INTEGER",
+        "audio_channels": "INTEGER",
     }
     for column, ddl in migrations.items():
         if column not in existing_columns:
             con.execute(f"ALTER TABLE downloads ADD COLUMN {column} {ddl}")
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS metadata_snapshots (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          download_id INTEGER NOT NULL,
+          captured_at TEXT NOT NULL,
+          source TEXT NOT NULL DEFAULT 'yt-dlp',
+          metadata_json TEXT NOT NULL,
+          FOREIGN KEY(download_id) REFERENCES downloads(id) ON DELETE CASCADE,
+          CHECK(json_valid(metadata_json)),
+          UNIQUE(download_id, source)
+        )
+        """
+    )
     con.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_downloads_original_url ON downloads(original_url)")
     con.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_downloads_tweet_downloaded "
@@ -149,6 +209,19 @@ def connect_db(db_path: Path) -> sqlite3.Connection:
         "ON downloads(duration_ms, content_fingerprint) "
         "WHERE content_fingerprint IS NOT NULL AND status='downloaded'"
     )
+    con.execute(
+        "CREATE INDEX IF NOT EXISTS idx_downloads_duplicate_of ON downloads(duplicate_of_id) "
+        "WHERE duplicate_of_id IS NOT NULL"
+    )
+    con.execute("CREATE INDEX IF NOT EXISTS idx_downloads_uploader ON downloads(uploader)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_downloads_uploader_id ON downloads(uploader_id)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_downloads_published ON downloads(published_at DESC)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_downloads_downloaded_at ON downloads(downloaded_at DESC)")
+    con.execute(
+        "CREATE INDEX IF NOT EXISTS idx_metadata_download_captured "
+        "ON metadata_snapshots(download_id, captured_at DESC)"
+    )
+    con.execute("PRAGMA user_version=3")
     con.commit()
     with contextlib.suppress(PermissionError):
         os.chmod(db_path, 0o600)
@@ -393,6 +466,64 @@ def previous_failed(con: sqlite3.Connection, candidate: Candidate) -> sqlite3.Ro
     ).fetchone()
 
 
+def source_metadata_fields(meta: dict[str, Any] | None, candidate: Candidate) -> dict[str, Any]:
+    if not meta:
+        return {"published_at": candidate.published_at}
+
+    def as_text(value: Any) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
+
+    def as_int(value: Any) -> int | None:
+        if value is None or isinstance(value, bool):
+            return None
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError):
+            return None
+
+    timestamp = as_int(meta.get("timestamp") or meta.get("release_timestamp"))
+    published_at = candidate.published_at
+    if not published_at and timestamp is not None:
+        with contextlib.suppress(ValueError, OSError, OverflowError):
+            published_at = dt.datetime.fromtimestamp(timestamp, dt.UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+    return {
+        "uploader": as_text(meta.get("uploader") or meta.get("channel")),
+        "uploader_id": as_text(meta.get("uploader_id") or meta.get("channel_id")),
+        "tweet_text": as_text(meta.get("description")),
+        "title": as_text(meta.get("title")),
+        "published_at": published_at,
+        "upload_timestamp": timestamp,
+        "view_count": as_int(meta.get("view_count")),
+        "like_count": as_int(meta.get("like_count")),
+        "repost_count": as_int(meta.get("repost_count") if meta.get("repost_count") is not None else meta.get("retweet_count")),
+        "comment_count": as_int(meta.get("comment_count") if meta.get("comment_count") is not None else meta.get("reply_count")),
+    }
+
+
+FILE_METADATA_COLUMNS = (
+    "width",
+    "height",
+    "fps_num",
+    "fps_den",
+    "video_codec",
+    "audio_codec",
+    "video_bitrate",
+    "audio_bitrate",
+    "container_format",
+    "pixel_format",
+    "audio_sample_rate",
+    "audio_channels",
+)
+
+
+def row_file_metadata(row: sqlite3.Row) -> dict[str, Any]:
+    return {name: row[name] for name in FILE_METADATA_COLUMNS}
+
+
 def upsert_status(
     con: sqlite3.Connection,
     candidate: Candidate,
@@ -409,28 +540,62 @@ def upsert_status(
     duplicate_of_id: int | None = None,
     quality: str | None = None,
     error: str | None = None,
+    source_metadata: dict[str, Any] | None = None,
+    file_metadata: dict[str, Any] | None = None,
+    downloaded_at: str | None = None,
 ) -> None:
     now = utc_now()
+    source = source_metadata_fields(source_metadata, candidate)
+    file_meta = file_metadata or {}
     con.execute(
         """
         INSERT INTO downloads (
-          original_url, direct_video_url, tweet_id, published_at, final_filename, file_path,
-          sha256, size_bytes, media_key, content_fingerprint, duration_ms, duplicate_of_id,
-          quality, status, error, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          original_url, direct_video_url, tweet_id,
+          uploader, uploader_id, tweet_text, title, published_at, upload_timestamp,
+          downloaded_at, view_count, like_count, repost_count, comment_count,
+          final_filename, file_path, sha256, size_bytes, media_key, content_fingerprint,
+          duration_ms, duplicate_of_id, width, height, fps_num, fps_den, video_codec,
+          audio_codec, video_bitrate, audio_bitrate, container_format, pixel_format,
+          audio_sample_rate, audio_channels, quality, status, error, created_at, updated_at
+        ) VALUES (
+          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+        )
         ON CONFLICT(original_url) DO UPDATE SET
-          direct_video_url=excluded.direct_video_url,
-          tweet_id=excluded.tweet_id,
-          published_at=COALESCE(excluded.published_at, downloads.published_at),
-          final_filename=excluded.final_filename,
-          file_path=excluded.file_path,
-          sha256=excluded.sha256,
-          size_bytes=excluded.size_bytes,
-          media_key=excluded.media_key,
-          content_fingerprint=excluded.content_fingerprint,
-          duration_ms=excluded.duration_ms,
+          direct_video_url=COALESCE(excluded.direct_video_url, downloads.direct_video_url),
+          tweet_id=COALESCE(excluded.tweet_id, downloads.tweet_id),
+          uploader=COALESCE(downloads.uploader, excluded.uploader),
+          uploader_id=COALESCE(downloads.uploader_id, excluded.uploader_id),
+          tweet_text=COALESCE(downloads.tweet_text, excluded.tweet_text),
+          title=COALESCE(downloads.title, excluded.title),
+          published_at=COALESCE(downloads.published_at, excluded.published_at),
+          upload_timestamp=COALESCE(downloads.upload_timestamp, excluded.upload_timestamp),
+          downloaded_at=COALESCE(downloads.downloaded_at, excluded.downloaded_at),
+          view_count=COALESCE(downloads.view_count, excluded.view_count),
+          like_count=COALESCE(downloads.like_count, excluded.like_count),
+          repost_count=COALESCE(downloads.repost_count, excluded.repost_count),
+          comment_count=COALESCE(downloads.comment_count, excluded.comment_count),
+          final_filename=COALESCE(excluded.final_filename, downloads.final_filename),
+          file_path=COALESCE(excluded.file_path, downloads.file_path),
+          sha256=COALESCE(excluded.sha256, downloads.sha256),
+          size_bytes=COALESCE(excluded.size_bytes, downloads.size_bytes),
+          media_key=COALESCE(excluded.media_key, downloads.media_key),
+          content_fingerprint=COALESCE(excluded.content_fingerprint, downloads.content_fingerprint),
+          duration_ms=COALESCE(excluded.duration_ms, downloads.duration_ms),
           duplicate_of_id=excluded.duplicate_of_id,
-          quality=excluded.quality,
+          width=COALESCE(excluded.width, downloads.width),
+          height=COALESCE(excluded.height, downloads.height),
+          fps_num=COALESCE(excluded.fps_num, downloads.fps_num),
+          fps_den=COALESCE(excluded.fps_den, downloads.fps_den),
+          video_codec=COALESCE(excluded.video_codec, downloads.video_codec),
+          audio_codec=COALESCE(excluded.audio_codec, downloads.audio_codec),
+          video_bitrate=COALESCE(excluded.video_bitrate, downloads.video_bitrate),
+          audio_bitrate=COALESCE(excluded.audio_bitrate, downloads.audio_bitrate),
+          container_format=COALESCE(excluded.container_format, downloads.container_format),
+          pixel_format=COALESCE(excluded.pixel_format, downloads.pixel_format),
+          audio_sample_rate=COALESCE(excluded.audio_sample_rate, downloads.audio_sample_rate),
+          audio_channels=COALESCE(excluded.audio_channels, downloads.audio_channels),
+          quality=COALESCE(excluded.quality, downloads.quality),
           status=excluded.status,
           error=excluded.error,
           updated_at=excluded.updated_at
@@ -439,7 +604,17 @@ def upsert_status(
             candidate.url,
             direct_video_url,
             candidate.tweet_id,
-            candidate.published_at,
+            source.get("uploader"),
+            source.get("uploader_id"),
+            source.get("tweet_text"),
+            source.get("title"),
+            source.get("published_at"),
+            source.get("upload_timestamp"),
+            downloaded_at,
+            source.get("view_count"),
+            source.get("like_count"),
+            source.get("repost_count"),
+            source.get("comment_count"),
             final_filename,
             file_path,
             sha256,
@@ -448,6 +623,18 @@ def upsert_status(
             content_fingerprint,
             duration_ms,
             duplicate_of_id,
+            file_meta.get("width"),
+            file_meta.get("height"),
+            file_meta.get("fps_num"),
+            file_meta.get("fps_den"),
+            file_meta.get("video_codec"),
+            file_meta.get("audio_codec"),
+            file_meta.get("video_bitrate"),
+            file_meta.get("audio_bitrate"),
+            file_meta.get("container_format"),
+            file_meta.get("pixel_format"),
+            file_meta.get("audio_sample_rate"),
+            file_meta.get("audio_channels"),
             quality,
             status,
             error,
@@ -455,6 +642,21 @@ def upsert_status(
             now,
         ),
     )
+    if source_metadata is not None:
+        row = con.execute("SELECT id FROM downloads WHERE original_url=?", (candidate.url,)).fetchone()
+        if row:
+            con.execute(
+                """
+                INSERT INTO metadata_snapshots(download_id, captured_at, source, metadata_json)
+                VALUES (?, ?, 'yt-dlp', ?)
+                ON CONFLICT(download_id, source) DO NOTHING
+                """,
+                (
+                    row["id"],
+                    now,
+                    json.dumps(source_metadata, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+                ),
+            )
     con.commit()
 
 
@@ -465,6 +667,7 @@ def record_duplicate(
     *,
     direct_video_url: str | None,
     media_key: str | None,
+    source_metadata: dict[str, Any],
     content_fingerprint: str | None = None,
     duration_ms: int | None = None,
     reason: str,
@@ -482,6 +685,8 @@ def record_duplicate(
         content_fingerprint=content_fingerprint or duplicate["content_fingerprint"],
         duration_ms=duration_ms or duplicate["duration_ms"],
         duplicate_of_id=duplicate["id"],
+        file_metadata=row_file_metadata(duplicate),
+        source_metadata=source_metadata,
         quality=duplicate["quality"],
         error=reason,
     )
@@ -517,6 +722,18 @@ def metadata_has_video(meta: dict[str, Any]) -> bool:
     if any((f.get("vcodec") or "none") != "none" for f in formats):
         return True
     return bool(meta.get("url") and meta.get("ext") in {"mp4", "webm", "mkv", "mov"})
+
+
+def parse_fraction(value: Any) -> tuple[int | None, int | None]:
+    if not isinstance(value, str) or "/" not in value:
+        return None, None
+    try:
+        numerator, denominator = (int(part) for part in value.split("/", 1))
+    except (TypeError, ValueError):
+        return None, None
+    if numerator < 0 or denominator <= 0:
+        return None, None
+    return numerator, denominator
 
 
 def media_key_from_url(value: Any) -> str | None:
@@ -613,21 +830,73 @@ def sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
-def ffprobe_duration_ms(path: Path) -> int | None:
+def ffprobe_file_metadata(path: Path) -> dict[str, Any]:
     ffprobe = shutil.which("ffprobe")
     if not ffprobe:
-        return None
+        return {}
     result = run(
-        [ffprobe, "-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", str(path)],
+        [
+            ffprobe,
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration,format_name,bit_rate:"
+            "stream=codec_type,codec_name,width,height,pix_fmt,avg_frame_rate,r_frame_rate,bit_rate,sample_rate,channels",
+            "-of",
+            "json",
+            str(path),
+        ],
         timeout=60,
     )
     if result.returncode != 0:
-        return None
-    with contextlib.suppress(ValueError, IndexError):
-        seconds = float(result.stdout.strip().splitlines()[0])
+        return {}
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return {}
+
+    streams = payload.get("streams") or []
+    video = next((item for item in streams if item.get("codec_type") == "video"), {})
+    audio = next((item for item in streams if item.get("codec_type") == "audio"), {})
+    fmt = payload.get("format") or {}
+
+    def positive_int(value: Any) -> int | None:
+        if value is None:
+            return None
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if parsed > 0 else None
+
+    duration_ms = None
+    try:
+        seconds = float(fmt.get("duration"))
         if seconds > 0:
-            return int(round(seconds * 1000))
-    return None
+            duration_ms = int(round(seconds * 1000))
+    except (TypeError, ValueError):
+        pass
+
+    fps_num, fps_den = parse_fraction(video.get("avg_frame_rate") or video.get("r_frame_rate"))
+    return {
+        "duration_ms": duration_ms,
+        "width": positive_int(video.get("width")),
+        "height": positive_int(video.get("height")),
+        "fps_num": fps_num,
+        "fps_den": fps_den,
+        "video_codec": video.get("codec_name") or None,
+        "audio_codec": audio.get("codec_name") or None,
+        "video_bitrate": positive_int(video.get("bit_rate")),
+        "audio_bitrate": positive_int(audio.get("bit_rate")),
+        "container_format": fmt.get("format_name") or None,
+        "pixel_format": video.get("pix_fmt") or None,
+        "audio_sample_rate": positive_int(audio.get("sample_rate")),
+        "audio_channels": positive_int(audio.get("channels")),
+    }
+
+
+def ffprobe_duration_ms(path: Path) -> int | None:
+    return ffprobe_file_metadata(path).get("duration_ms")
 
 
 def frame_dhash_signature(path: Path, timestamp: float) -> str | None:
@@ -756,18 +1025,56 @@ def reindex_content(con: sqlite3.Connection, logfile: Path | None) -> tuple[int,
             continue
         path = Path(file_path)
         try:
+            file_meta = ffprobe_file_metadata(path)
+            duration_ms = row["duration_ms"] or file_meta.get("duration_ms")
             sha256 = row["sha256"] or sha256_file(path)
-            duration_ms = row["duration_ms"] or ffprobe_duration_ms(path)
             fingerprint = row["content_fingerprint"] or video_content_fingerprint(path, duration_ms)
             media_key = row["media_key"] or media_key_from_url(row["direct_video_url"])
             size_bytes = row["size_bytes"] or path.stat().st_size
             con.execute(
                 """
-                UPDATE downloads
-                SET sha256=?, size_bytes=?, media_key=?, content_fingerprint=?, duration_ms=?, updated_at=?
+                UPDATE downloads SET
+                  sha256=COALESCE(sha256, ?),
+                  size_bytes=COALESCE(size_bytes, ?),
+                  media_key=COALESCE(media_key, ?),
+                  content_fingerprint=COALESCE(content_fingerprint, ?),
+                  duration_ms=COALESCE(duration_ms, ?),
+                  width=COALESCE(width, ?),
+                  height=COALESCE(height, ?),
+                  fps_num=COALESCE(fps_num, ?),
+                  fps_den=COALESCE(fps_den, ?),
+                  video_codec=COALESCE(video_codec, ?),
+                  audio_codec=COALESCE(audio_codec, ?),
+                  video_bitrate=COALESCE(video_bitrate, ?),
+                  audio_bitrate=COALESCE(audio_bitrate, ?),
+                  container_format=COALESCE(container_format, ?),
+                  pixel_format=COALESCE(pixel_format, ?),
+                  audio_sample_rate=COALESCE(audio_sample_rate, ?),
+                  audio_channels=COALESCE(audio_channels, ?),
+                  updated_at=?
                 WHERE id=?
                 """,
-                (sha256, size_bytes, media_key, fingerprint, duration_ms, utc_now(), row["id"]),
+                (
+                    sha256,
+                    size_bytes,
+                    media_key,
+                    fingerprint,
+                    duration_ms,
+                    file_meta.get("width"),
+                    file_meta.get("height"),
+                    file_meta.get("fps_num"),
+                    file_meta.get("fps_den"),
+                    file_meta.get("video_codec"),
+                    file_meta.get("audio_codec"),
+                    file_meta.get("video_bitrate"),
+                    file_meta.get("audio_bitrate"),
+                    file_meta.get("container_format"),
+                    file_meta.get("pixel_format"),
+                    file_meta.get("audio_sample_rate"),
+                    file_meta.get("audio_channels"),
+                    utc_now(),
+                    row["id"],
+                ),
             )
             con.commit()
             updated += 1
@@ -789,6 +1096,7 @@ def download_one(args: argparse.Namespace, con: sqlite3.Connection, candidate: C
         summary.skipped_previous_failed += 1
         log(f"skip previous_failed tweet_id={candidate.tweet_id} use --retry-failed to retry", logfile)
         return
+    meta: dict[str, Any] | None = None
     try:
         meta = extract_metadata(args, candidate, logfile)
         if not metadata_has_video(meta):
@@ -805,6 +1113,7 @@ def download_one(args: argparse.Namespace, con: sqlite3.Connection, candidate: C
                     duplicate,
                     direct_video_url=direct,
                     media_key=media_key,
+                    source_metadata=meta,
                     reason=f"duplicate media asset: {media_key}",
                 )
                 summary.skipped_duplicate += 1
@@ -847,7 +1156,8 @@ def download_one(args: argparse.Namespace, con: sqlite3.Connection, candidate: C
             raise RuntimeError("download completed but final file was not found")
         final, quality = ensure_max_480(final, logfile)
         sha256 = sha256_file(final)
-        duration_ms = ffprobe_duration_ms(final)
+        file_metadata = ffprobe_file_metadata(final)
+        duration_ms = file_metadata.get("duration_ms")
         content_fingerprint = video_content_fingerprint(final, duration_ms)
         duplicate = downloaded_by_sha256(con, sha256)
         duplicate_reason = "duplicate exact content: sha256"
@@ -862,6 +1172,7 @@ def download_one(args: argparse.Namespace, con: sqlite3.Connection, candidate: C
                 duplicate,
                 direct_video_url=direct,
                 media_key=media_key,
+                source_metadata=meta,
                 content_fingerprint=content_fingerprint,
                 duration_ms=duration_ms,
                 reason=duplicate_reason,
@@ -886,6 +1197,9 @@ def download_one(args: argparse.Namespace, con: sqlite3.Connection, candidate: C
             content_fingerprint=content_fingerprint,
             duration_ms=duration_ms,
             duplicate_of_id=None,
+            source_metadata=meta,
+            file_metadata=file_metadata,
+            downloaded_at=utc_now(),
             quality=quality,
             error=None,
         )
@@ -893,7 +1207,7 @@ def download_one(args: argparse.Namespace, con: sqlite3.Connection, candidate: C
         log(f"downloaded tweet_id={candidate.tweet_id} file={final}", logfile)
     except Exception as exc:
         if not args.dry_run:
-            upsert_status(con, candidate, "failed", error=str(exc))
+            upsert_status(con, candidate, "failed", source_metadata=meta, error=str(exc))
         summary.failed += 1
         log(f"failed tweet_id={candidate.tweet_id} error={exc}", logfile)
 
@@ -918,6 +1232,10 @@ def print_status(con: sqlite3.Connection, output_dir: Path, db_path: Path) -> No
     media_indexed = con.execute(
         "SELECT COUNT(*) FROM downloads WHERE status='downloaded' AND media_key IS NOT NULL"
     ).fetchone()[0]
+    technical_indexed = con.execute(
+        "SELECT COUNT(*) FROM downloads WHERE status='downloaded' AND width IS NOT NULL AND video_codec IS NOT NULL"
+    ).fetchone()[0]
+    metadata_snapshots = con.execute("SELECT COUNT(*) FROM metadata_snapshots").fetchone()[0]
     size = sum(p.stat().st_size for p in output_dir.glob("**/*") if p.is_file()) if output_dir.exists() else 0
     print(f"version: {VERSION}")
     print(f"db: {db_path}")
@@ -928,6 +1246,8 @@ def print_status(con: sqlite3.Connection, output_dir: Path, db_path: Path) -> No
     print(f"failed: {counts.get('failed', 0)}")
     print(f"content_fingerprint_indexed: {indexed}")
     print(f"media_key_indexed: {media_indexed}")
+    print(f"technical_metadata_indexed: {technical_indexed}")
+    print(f"yt_dlp_metadata_snapshots: {metadata_snapshots}")
     print(f"output_size_bytes: {size}")
 
 
@@ -950,7 +1270,7 @@ def parse_args() -> argparse.Namespace:
     action.add_argument(
         "--reindex-content",
         action="store_true",
-        help="backfill SHA/media/perceptual fingerprints for existing downloaded files",
+        help="backfill hashes, perceptual fingerprints, and ffprobe metadata for existing downloaded files",
     )
     parser.add_argument("--cookies-mode", choices=["auto", "firefox", "manual", "none"], default="auto")
     parser.add_argument("--firefox-profile", help="optional Firefox profile path/name for yt-dlp cookies")

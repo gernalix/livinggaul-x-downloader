@@ -42,7 +42,7 @@ The downloader still deduplicates through SQLite and the yt-dlp archive.
 
 ## Content deduplication
 
-Version 0.2.0 also deduplicates videos independently of the X post URL:
+Version 0.3.0 also deduplicates videos independently of the X post URL:
 
 - before download it extracts a stable key from `video.twimg.com` asset URLs when available;
 - after download it checks SHA-256 for byte-identical files;
@@ -52,9 +52,20 @@ Version 0.2.0 also deduplicates videos independently of the X post URL:
 
 File size is stored as metadata but is not treated as a unique identifier.
 
+## Metadata catalog
+
+Version 0.3.0 expands the SQLite history into a metadata catalog. Each processed X video can store:
+
+- X/yt-dlp metadata: uploader, uploader id, post text, title, publication/upload time, and one static snapshot of views, likes, reposts, and comments when exposed by X;
+- final-file metadata from `ffprobe`: width, height, exact FPS numerator/denominator, video/audio codecs and bitrates, container, pixel format, sample rate, channels, duration, and size;
+- integrity/deduplication data: SHA-256, X media key, perceptual fingerprint, and canonical duplicate linkage;
+- one immutable raw `yt-dlp --dump-single-json` snapshot in `metadata_snapshots`, preserving metadata that is not normalized into columns.
+
+Social counters are intentionally static snapshots; the downloader does not refresh them later. Metadata unavailable from X or ffprobe remains NULL. `--reindex-content` backfills file-derived metadata for historical local files without making network requests.
+
 ## Versioning
 
-- Current version: `0.2.0`
+- Current version: `0.3.0`
 - Prompt: `#392814`
 - Script first line keeps the version marker.
 

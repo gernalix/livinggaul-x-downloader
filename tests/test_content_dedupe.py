@@ -36,7 +36,36 @@ class ContentDedupeTests(unittest.TestCase):
         self.assertTrue(match(left, close))
         self.assertFalse(match(left, far))
 
-    def test_existing_database_is_migrated_with_content_columns(self):
+    def test_source_metadata_maps_static_social_counters_and_aliases(self):
+        Candidate = MODULE["Candidate"]
+        fields = MODULE["source_metadata_fields"](
+            {
+                "uploader": "LivingGaul",
+                "uploader_id": "123",
+                "description": "post text",
+                "title": "post title",
+                "timestamp": 1_700_000_000,
+                "view_count": 100,
+                "like_count": 10,
+                "retweet_count": 7,
+                "reply_count": 3,
+            },
+            Candidate(tweet_id="1234567890123456789", url="https://x.com/LivingGaul/status/1234567890123456789"),
+        )
+        self.assertEqual(fields["uploader"], "LivingGaul")
+        self.assertEqual(fields["repost_count"], 7)
+        self.assertEqual(fields["comment_count"], 3)
+        self.assertEqual(fields["view_count"], 100)
+        self.assertEqual(fields["like_count"], 10)
+        self.assertIsNotNone(fields["published_at"])
+
+    def test_fraction_parser_preserves_exact_fps(self):
+        parse = MODULE["parse_fraction"]
+        self.assertEqual(parse("30000/1001"), (30000, 1001))
+        self.assertEqual(parse("0/0"), (None, None))
+        self.assertEqual(parse(None), (None, None))
+
+    def test_existing_database_migrates_to_schema_v3(self):
         connect_db = MODULE["connect_db"]
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "history.sqlite"
@@ -65,9 +94,68 @@ class ContentDedupeTests(unittest.TestCase):
             raw.close()
             con = connect_db(db_path)
             columns = {row["name"] for row in con.execute("PRAGMA table_info(downloads)")}
-            self.assertTrue(
-                {"media_key", "content_fingerprint", "duration_ms", "duplicate_of_id"}.issubset(columns)
+            expected = {
+                "media_key", "content_fingerprint", "duration_ms", "duplicate_of_id",
+                "uploader", "uploader_id", "tweet_text", "title", "upload_timestamp",
+                "downloaded_at", "view_count", "like_count", "repost_count", "comment_count",
+                "width", "height", "fps_num", "fps_den", "video_codec", "audio_codec",
+                "video_bitrate", "audio_bitrate", "container_format", "pixel_format",
+                "audio_sample_rate", "audio_channels",
+            }
+            self.assertTrue(expected.issubset(columns))
+            tables = {row[0] for row in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            self.assertIn("metadata_snapshots", tables)
+            self.assertEqual(con.execute("PRAGMA user_version").fetchone()[0], 3)
+            con.close()
+
+    def test_upsert_persists_normalized_and_raw_metadata_once(self):
+        connect_db = MODULE["connect_db"]
+        Candidate = MODULE["Candidate"]
+        upsert_status = MODULE["upsert_status"]
+        with tempfile.TemporaryDirectory() as tmp:
+            con = connect_db(Path(tmp) / "history.sqlite")
+            candidate = Candidate(
+                tweet_id="1234567890123456789",
+                url="https://x.com/LivingGaul/status/1234567890123456789",
             )
+            meta = {
+                "uploader": "LivingGaul",
+                "description": "hello",
+                "view_count": 42,
+                "like_count": 5,
+            }
+            file_meta = {
+                "width": 854,
+                "height": 480,
+                "fps_num": 30000,
+                "fps_den": 1001,
+                "video_codec": "h264",
+                "audio_codec": "aac",
+                "video_bitrate": 500000,
+                "audio_bitrate": 96000,
+                "container_format": "mov,mp4,m4a,3gp,3g2,mj2",
+                "pixel_format": "yuv420p",
+                "audio_sample_rate": 48000,
+                "audio_channels": 2,
+            }
+            upsert_status(
+                con,
+                candidate,
+                "downloaded",
+                source_metadata=meta,
+                file_metadata=file_meta,
+                downloaded_at="2026-09-19T00:00:00Z",
+            )
+            row = con.execute("SELECT * FROM downloads").fetchone()
+            self.assertEqual(row["uploader"], "LivingGaul")
+            self.assertEqual(row["view_count"], 42)
+            self.assertEqual(row["width"], 854)
+            self.assertEqual(row["video_codec"], "h264")
+            snap = con.execute("SELECT metadata_json FROM metadata_snapshots").fetchone()
+            self.assertIn('"view_count":42', snap["metadata_json"])
+            upsert_status(con, candidate, "downloaded", source_metadata={"view_count": 999})
+            self.assertEqual(con.execute("SELECT view_count FROM downloads").fetchone()[0], 42)
+            self.assertEqual(con.execute("SELECT COUNT(*) FROM metadata_snapshots").fetchone()[0], 1)
             con.close()
 
 
