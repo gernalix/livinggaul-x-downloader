@@ -100,14 +100,15 @@ class ContentDedupeTests(unittest.TestCase):
                 "downloaded_at", "view_count", "like_count", "repost_count", "comment_count",
                 "width", "height", "fps_num", "fps_den", "video_codec", "audio_codec",
                 "video_bitrate", "audio_bitrate", "container_format", "pixel_format",
-                "audio_sample_rate", "audio_channels",
+                "audio_sample_rate", "audio_channels", "source_availability", "source_checked_at", "source_check_error",
             }
             self.assertTrue(expected.issubset(columns))
             tables = {row[0] for row in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             self.assertIn("metadata_snapshots", tables)
-            self.assertEqual(con.execute("PRAGMA user_version").fetchone()[0], 3)
+            self.assertEqual(con.execute("PRAGMA user_version").fetchone()[0], 4)
             views = {row[0] for row in con.execute("SELECT name FROM sqlite_master WHERE type='view'")}
             self.assertIn("video_catalog", views)
+            self.assertIn("source_unavailable_percentage", views)
             con.close()
 
     def test_upsert_persists_normalized_and_raw_metadata_once(self):
@@ -204,6 +205,82 @@ class ContentDedupeTests(unittest.TestCase):
             self.assertEqual(
                 [(row["download_date"], row["videos"], row["total_mb"]) for row in daily],
                 [("2026-09-18", 2, 2.0), ("2026-09-19", 1, 3.0)],
+            )
+            con.close()
+
+    def test_source_error_classification_is_conservative(self):
+        classify = MODULE["source_error_means_unavailable"]
+        self.assertTrue(classify("ERROR: This Tweet is unavailable"))
+        self.assertTrue(classify("HTTP Error 404: Not Found"))
+        self.assertFalse(classify("HTTP Error 429: Too Many Requests"))
+        self.assertFalse(classify("Login required; cookies expired"))
+
+    def test_unavailable_percentage_view_has_one_value(self):
+        connect_db = MODULE["connect_db"]
+        Candidate = MODULE["Candidate"]
+        upsert_status = MODULE["upsert_status"]
+        with tempfile.TemporaryDirectory() as tmp:
+            con = connect_db(Path(tmp) / "history.sqlite")
+            empty = con.execute("SELECT * FROM source_unavailable_percentage")
+            self.assertEqual(len(empty.description), 1)
+            self.assertIsNone(empty.fetchone()[0])
+
+            statuses = ["available", "unavailable", "unknown", "available"]
+            for index, availability in enumerate(statuses, start=1):
+                tweet_id = f"12345678901234567{index:02d}"
+                candidate = Candidate(
+                    tweet_id=tweet_id,
+                    url=f"https://x.com/LivingGaul/status/{tweet_id}",
+                )
+                upsert_status(con, candidate, "downloaded")
+                con.execute(
+                    "UPDATE downloads SET source_availability=?, source_checked_at=? WHERE tweet_id=?",
+                    (availability, "2026-09-19T08:00:00Z", tweet_id),
+                )
+            con.commit()
+            cursor = con.execute("SELECT * FROM source_unavailable_percentage")
+            self.assertEqual(len(cursor.description), 1)
+            self.assertEqual(cursor.fetchone()[0], 25.0)
+            con.close()
+
+    def test_refresh_source_availability_updates_downloaded_rows_only(self):
+        connect_db = MODULE["connect_db"]
+        Candidate = MODULE["Candidate"]
+        upsert_status = MODULE["upsert_status"]
+        refresh = MODULE["refresh_source_availability"]
+
+        class Args:
+            cookies_mode = "none"
+            firefox_profile = None
+
+        with tempfile.TemporaryDirectory() as tmp:
+            con = connect_db(Path(tmp) / "history.sqlite")
+            expected = {}
+            for index, availability in enumerate(("available", "unavailable", "unknown"), start=1):
+                tweet_id = f"12345678901234568{index:02d}"
+                candidate = Candidate(tweet_id=tweet_id, url=f"https://x.com/LivingGaul/status/{tweet_id}")
+                upsert_status(con, candidate, "downloaded")
+                expected[tweet_id] = availability
+            failed_id = "1234567890123456899"
+            upsert_status(
+                con,
+                Candidate(tweet_id=failed_id, url=f"https://x.com/LivingGaul/status/{failed_id}"),
+                "failed",
+            )
+
+            def fake_probe(args, candidate, logfile):
+                status = expected[candidate.tweet_id]
+                return status, "temporary failure" if status == "unknown" else None
+
+            counts = refresh(Args(), con, None, probe=fake_probe)
+            self.assertEqual(counts, {"total": 3, "available": 1, "unavailable": 1, "unknown": 1})
+            rows = con.execute(
+                "SELECT tweet_id, source_availability, source_checked_at FROM downloads WHERE status='downloaded'"
+            ).fetchall()
+            self.assertEqual({row["tweet_id"]: row["source_availability"] for row in rows}, expected)
+            self.assertTrue(all(row["source_checked_at"] for row in rows))
+            self.assertIsNone(
+                con.execute("SELECT source_availability FROM downloads WHERE tweet_id=?", (failed_id,)).fetchone()[0]
             )
             con.close()
 

@@ -15,6 +15,7 @@ livinggaul-x-downloader --status
 livinggaul-x-downloader --list-failed
 livinggaul-x-downloader --retry-failed
 livinggaul-x-downloader --reindex-content
+livinggaul-x-downloader --check-source-availability
 ```
 
 Cookie modes:
@@ -42,7 +43,7 @@ The downloader still deduplicates through SQLite and the yt-dlp archive.
 
 ## Content deduplication
 
-Version 0.3.1 also deduplicates videos independently of the X post URL:
+Version 0.4.0 also deduplicates videos independently of the X post URL:
 
 - before download it extracts a stable key from `video.twimg.com` asset URLs when available;
 - after download it checks SHA-256 for byte-identical files;
@@ -54,7 +55,7 @@ File size is stored as metadata but is not treated as a unique identifier.
 
 ## Metadata catalog
 
-Version 0.3.1 expands the SQLite history into a metadata catalog. Each processed X video can store:
+Version 0.4.0 expands the SQLite history into a metadata catalog. Each processed X video can store:
 
 - X/yt-dlp metadata: uploader, uploader id, post text, title, publication/upload time, and one static snapshot of views, likes, reposts, and comments when exposed by X;
 - final-file metadata from `ffprobe`: width, height, exact FPS numerator/denominator, video/audio codecs and bitrates, container, pixel format, sample rate, channels, duration, and size;
@@ -89,9 +90,34 @@ ORDER BY download_date;
 
 Because `download_date` falls back to the row creation date when an older row has no explicit `downloaded_at`, migrated historical rows remain groupable.
 
+### Source availability percentage
+
+Version 0.4.0 can also check whether the original X link for each already-downloaded video still exposes a downloadable video:
+
+```bash
+livinggaul-x-downloader --check-source-availability
+```
+
+The check never downloads the video. A successful yt-dlp metadata probe with video formats is stored as `available`; recognized permanent conditions such as a deleted/unavailable post or HTTP 404 are stored as `unavailable`; rate limits, authentication problems, timeouts, and other ambiguous failures are stored as `unknown`.
+
+The single-value view `source_unavailable_percentage` contains exactly one column:
+
+```sql
+SELECT unavailable_percentage
+FROM source_unavailable_percentage;
+```
+
+Its value is:
+
+```text
+100 × downloaded rows currently marked unavailable / all downloaded rows
+```
+
+Rows that are `unknown` or have never been checked remain in the denominator but not the numerator. When there are no downloaded videos, the value is NULL rather than a misleading 0%. The value is only as fresh as the last `--check-source-availability` run.
+
 ## Versioning
 
-- Current version: `0.3.1`
+- Current version: `0.4.0`
 - Prompt: `#392814`
 - Script first line keeps the version marker.
 

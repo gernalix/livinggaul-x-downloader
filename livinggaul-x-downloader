@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# VERSION=0.3.1 prompt=392814 reusable LivingGaul X video downloader
+# VERSION=0.4.0 prompt=392814 reusable LivingGaul X video downloader
 from __future__ import annotations
 
 import argparse
@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-VERSION = "0.3.1"
+VERSION = "0.4.0"
 PROFILE_URL = "https://x.com/LivingGaul"
 SCREEN_NAME = "LivingGaul"
 DEFAULT_OUTPUT_DIR = Path.home() / "Videos" / "LivingGaul_X"
@@ -52,6 +52,22 @@ X_MEDIA_URL_RE = re.compile(
 )
 FINGERPRINT_PREFIX = "dhash16-v1"
 FINGERPRINT_FRAME_COUNT = 5
+SOURCE_UNAVAILABLE_PATTERNS = (
+    "this tweet is unavailable",
+    "this post is unavailable",
+    "tweet is not available",
+    "post is not available",
+    "this content is not available",
+    "no video could be found in this tweet",
+    "no video could be found in this post",
+    "does not exist",
+    "has been deleted",
+    "was deleted",
+    "account is suspended",
+    "user is suspended",
+    "http error 404",
+    "status code 404",
+)
 
 
 @dataclass(frozen=True)
@@ -133,6 +149,11 @@ def connect_db(db_path: Path) -> sqlite3.Connection:
           pixel_format TEXT,
           audio_sample_rate INTEGER CHECK(audio_sample_rate IS NULL OR audio_sample_rate > 0),
           audio_channels INTEGER CHECK(audio_channels IS NULL OR audio_channels > 0),
+          source_availability TEXT CHECK(
+            source_availability IS NULL OR source_availability IN ('available','unavailable','unknown')
+          ),
+          source_checked_at TEXT,
+          source_check_error TEXT,
           quality TEXT,
           status TEXT NOT NULL CHECK(status IN ('downloaded','skipped_duplicate','failed')),
           error TEXT,
@@ -170,6 +191,9 @@ def connect_db(db_path: Path) -> sqlite3.Connection:
         "pixel_format": "TEXT",
         "audio_sample_rate": "INTEGER",
         "audio_channels": "INTEGER",
+        "source_availability": "TEXT",
+        "source_checked_at": "TEXT",
+        "source_check_error": "TEXT",
     }
     for column, ddl in migrations.items():
         if column not in existing_columns:
@@ -218,6 +242,10 @@ def connect_db(db_path: Path) -> sqlite3.Connection:
     con.execute("CREATE INDEX IF NOT EXISTS idx_downloads_published ON downloads(published_at DESC)")
     con.execute("CREATE INDEX IF NOT EXISTS idx_downloads_downloaded_at ON downloads(downloaded_at DESC)")
     con.execute("CREATE INDEX IF NOT EXISTS idx_downloads_created_at ON downloads(created_at DESC)")
+    con.execute(
+        "CREATE INDEX IF NOT EXISTS idx_downloads_source_availability "
+        "ON downloads(status, source_availability)"
+    )
     con.execute(
         "CREATE INDEX IF NOT EXISTS idx_metadata_download_captured "
         "ON metadata_snapshots(download_id, captured_at DESC)"
@@ -271,6 +299,9 @@ def connect_db(db_path: Path) -> sqlite3.Connection:
           d.pixel_format,
           d.audio_sample_rate,
           d.audio_channels,
+          d.source_availability,
+          d.source_checked_at,
+          d.source_check_error,
           d.view_count,
           d.like_count,
           d.repost_count,
@@ -292,7 +323,24 @@ def connect_db(db_path: Path) -> sqlite3.Connection:
          AND m.source = 'yt-dlp'
         """
     )
-    con.execute("PRAGMA user_version=3")
+    con.execute("DROP VIEW IF EXISTS source_unavailable_percentage")
+    con.execute(
+        """
+        CREATE VIEW source_unavailable_percentage AS
+        SELECT
+          CASE
+            WHEN COUNT(*) = 0 THEN NULL
+            ELSE ROUND(
+              100.0 * SUM(CASE WHEN source_availability='unavailable' THEN 1 ELSE 0 END)
+              / COUNT(*),
+              2
+            )
+          END AS unavailable_percentage
+        FROM downloads
+        WHERE status='downloaded'
+        """
+    )
+    con.execute("PRAGMA user_version=4")
     con.commit()
     with contextlib.suppress(PermissionError):
         os.chmod(db_path, 0o600)
@@ -793,6 +841,80 @@ def metadata_has_video(meta: dict[str, Any]) -> bool:
     if any((f.get("vcodec") or "none") != "none" for f in formats):
         return True
     return bool(meta.get("url") and meta.get("ext") in {"mp4", "webm", "mkv", "mov"})
+
+
+def source_error_means_unavailable(error: str) -> bool:
+    normalized = error.lower()
+    return any(pattern in normalized for pattern in SOURCE_UNAVAILABLE_PATTERNS)
+
+
+def probe_source_availability(
+    args: argparse.Namespace,
+    candidate: Candidate,
+    logfile: Path | None,
+) -> tuple[str, str | None]:
+    try:
+        meta = extract_metadata(args, candidate, logfile)
+        if metadata_has_video(meta):
+            return "available", None
+        return "unavailable", "source returned no downloadable video"
+    except Exception as exc:
+        error = str(exc)
+        if source_error_means_unavailable(error):
+            return "unavailable", error
+        return "unknown", error
+
+
+def refresh_source_availability(
+    args: argparse.Namespace,
+    con: sqlite3.Connection,
+    logfile: Path | None,
+    *,
+    probe: Any = probe_source_availability,
+) -> dict[str, int]:
+    rows = con.execute(
+        """
+        SELECT id, original_url, tweet_id, published_at
+        FROM downloads
+        WHERE status='downloaded'
+        ORDER BY id
+        """
+    ).fetchall()
+    counts = {"total": len(rows), "available": 0, "unavailable": 0, "unknown": 0}
+    for index, row in enumerate(rows):
+        match = TWEET_RE.search(row["original_url"] or "")
+        tweet_id = row["tweet_id"] or (match.group("id") if match else str(row["id"]))
+        candidate = Candidate(
+            tweet_id=str(tweet_id),
+            url=row["original_url"],
+            published_at=row["published_at"],
+            source="availability-check",
+        )
+        status, error = probe(args, candidate, logfile)
+        if status not in {"available", "unavailable", "unknown"}:
+            raise RuntimeError(f"invalid source availability status: {status}")
+        checked_at = utc_now()
+        con.execute(
+            """
+            UPDATE downloads
+            SET source_availability=?,
+                source_checked_at=?,
+                source_check_error=?,
+                updated_at=?
+            WHERE id=?
+            """,
+            (status, checked_at, error, checked_at, row["id"]),
+        )
+        con.commit()
+        counts[status] += 1
+        log(
+            f"source availability tweet_id={candidate.tweet_id} status={status}"
+            + (f" error={error}" if error else ""),
+            logfile,
+        )
+        if index + 1 < len(rows):
+            time.sleep(1)
+    return counts
 
 
 def parse_fraction(value: Any) -> tuple[int | None, int | None]:
@@ -1307,6 +1429,9 @@ def print_status(con: sqlite3.Connection, output_dir: Path, db_path: Path) -> No
         "SELECT COUNT(*) FROM downloads WHERE status='downloaded' AND width IS NOT NULL AND video_codec IS NOT NULL"
     ).fetchone()[0]
     metadata_snapshots = con.execute("SELECT COUNT(*) FROM metadata_snapshots").fetchone()[0]
+    availability = con.execute(
+        "SELECT unavailable_percentage FROM source_unavailable_percentage"
+    ).fetchone()[0]
     size = sum(p.stat().st_size for p in output_dir.glob("**/*") if p.is_file()) if output_dir.exists() else 0
     print(f"version: {VERSION}")
     print(f"db: {db_path}")
@@ -1319,6 +1444,7 @@ def print_status(con: sqlite3.Connection, output_dir: Path, db_path: Path) -> No
     print(f"media_key_indexed: {media_indexed}")
     print(f"technical_metadata_indexed: {technical_indexed}")
     print(f"yt_dlp_metadata_snapshots: {metadata_snapshots}")
+    print(f"source_unavailable_percentage: {availability}")
     print(f"output_size_bytes: {size}")
 
 
@@ -1342,6 +1468,11 @@ def parse_args() -> argparse.Namespace:
         "--reindex-content",
         action="store_true",
         help="backfill hashes, perceptual fingerprints, and ffprobe metadata for existing downloaded files",
+    )
+    action.add_argument(
+        "--check-source-availability",
+        action="store_true",
+        help="probe each downloaded video's original X link without downloading and store current availability",
     )
     parser.add_argument("--cookies-mode", choices=["auto", "firefox", "manual", "none"], default="auto")
     parser.add_argument("--firefox-profile", help="optional Firefox profile path/name for yt-dlp cookies")
@@ -1369,6 +1500,20 @@ def main() -> int:
         print(f"reindex missing_files: {missing}")
         print(f"reindex failed: {failed}")
         return 0 if failed == 0 else 1
+    if args.check_source_availability:
+        if args.cookies_mode == "manual":
+            print("Manual login mode cannot probe availability; use --cookies-mode firefox or auto.", file=sys.stderr)
+            return 2
+        counts = refresh_source_availability(args, con, logfile)
+        percentage = con.execute(
+            "SELECT unavailable_percentage FROM source_unavailable_percentage"
+        ).fetchone()[0]
+        print(f"availability total: {counts['total']}")
+        print(f"availability available: {counts['available']}")
+        print(f"availability unavailable: {counts['unavailable']}")
+        print(f"availability unknown: {counts['unknown']}")
+        print(f"source unavailable percentage: {percentage}")
+        return 0
     if args.cookies_mode == "manual":
         print("Manual login mode: open Firefox, log in to X, then rerun with --cookies-mode firefox or auto.", file=sys.stderr)
         return 2
