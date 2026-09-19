@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# VERSION=0.1.3 prompt=392814 reusable LivingGaul X video downloader
+# VERSION=0.2.0 prompt=392814 reusable LivingGaul X video downloader
 from __future__ import annotations
 
 import argparse
@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-VERSION = "0.1.3"
+VERSION = "0.2.0"
 PROFILE_URL = "https://x.com/LivingGaul"
 SCREEN_NAME = "LivingGaul"
 DEFAULT_OUTPUT_DIR = Path.home() / "Videos" / "LivingGaul_X"
@@ -46,6 +46,12 @@ NITTER_INSTANCES = (
     "https://nitter.privacydev.net",
     "https://nitter.tiekoetter.com",
 )
+X_MEDIA_URL_RE = re.compile(
+    r"https?://video\.twimg\.com/(?P<kind>ext_tw_video|amplify_video|tweet_video)/(?P<asset>[^/?#]+)",
+    re.IGNORECASE,
+)
+FINGERPRINT_PREFIX = "dhash16-v1"
+FINGERPRINT_FRAME_COUNT = 5
 
 
 @dataclass(frozen=True)
@@ -100,6 +106,10 @@ def connect_db(db_path: Path) -> sqlite3.Connection:
           file_path TEXT,
           sha256 TEXT,
           size_bytes INTEGER,
+          media_key TEXT,
+          content_fingerprint TEXT,
+          duration_ms INTEGER,
+          duplicate_of_id INTEGER,
           quality TEXT,
           status TEXT NOT NULL CHECK(status IN ('downloaded','skipped_duplicate','failed')),
           error TEXT,
@@ -108,6 +118,16 @@ def connect_db(db_path: Path) -> sqlite3.Connection:
         )
         """
     )
+    existing_columns = {row["name"] for row in con.execute("PRAGMA table_info(downloads)")}
+    migrations = {
+        "media_key": "TEXT",
+        "content_fingerprint": "TEXT",
+        "duration_ms": "INTEGER",
+        "duplicate_of_id": "INTEGER",
+    }
+    for column, ddl in migrations.items():
+        if column not in existing_columns:
+            con.execute(f"ALTER TABLE downloads ADD COLUMN {column} {ddl}")
     con.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_downloads_original_url ON downloads(original_url)")
     con.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_downloads_tweet_downloaded "
@@ -115,6 +135,19 @@ def connect_db(db_path: Path) -> sqlite3.Connection:
     )
     con.execute(
         "CREATE INDEX IF NOT EXISTS idx_downloads_status_updated ON downloads(status, updated_at)"
+    )
+    con.execute(
+        "CREATE INDEX IF NOT EXISTS idx_downloads_media_key ON downloads(media_key) "
+        "WHERE media_key IS NOT NULL AND status='downloaded'"
+    )
+    con.execute(
+        "CREATE INDEX IF NOT EXISTS idx_downloads_sha256 ON downloads(sha256) "
+        "WHERE sha256 IS NOT NULL AND status='downloaded'"
+    )
+    con.execute(
+        "CREATE INDEX IF NOT EXISTS idx_downloads_fingerprint_duration "
+        "ON downloads(duration_ms, content_fingerprint) "
+        "WHERE content_fingerprint IS NOT NULL AND status='downloaded'"
     )
     con.commit()
     with contextlib.suppress(PermissionError):
@@ -300,6 +333,35 @@ def candidates_from_url_file(path: Path) -> list[Candidate]:
     return sorted(candidates.values(), key=lambda c: int(c.tweet_id), reverse=True)
 
 
+def row_has_existing_file(row: sqlite3.Row) -> bool:
+    file_path = row["file_path"]
+    return bool(file_path and Path(file_path).exists())
+
+
+def downloaded_by_media_key(con: sqlite3.Connection, media_key: str) -> sqlite3.Row | None:
+    rows = con.execute(
+        """
+        SELECT * FROM downloads
+        WHERE status='downloaded' AND media_key=?
+        ORDER BY updated_at DESC
+        """,
+        (media_key,),
+    ).fetchall()
+    return next((row for row in rows if row_has_existing_file(row)), None)
+
+
+def downloaded_by_sha256(con: sqlite3.Connection, sha256: str) -> sqlite3.Row | None:
+    rows = con.execute(
+        """
+        SELECT * FROM downloads
+        WHERE status='downloaded' AND sha256=?
+        ORDER BY updated_at DESC
+        """,
+        (sha256,),
+    ).fetchall()
+    return next((row for row in rows if row_has_existing_file(row)), None)
+
+
 def already_downloaded(con: sqlite3.Connection, candidate: Candidate) -> sqlite3.Row | None:
     row = con.execute(
         """
@@ -313,8 +375,7 @@ def already_downloaded(con: sqlite3.Connection, candidate: Candidate) -> sqlite3
     ).fetchone()
     if not row:
         return None
-    file_path = row["file_path"]
-    if file_path and Path(file_path).exists():
+    if row_has_existing_file(row):
         return row
     return None
 
@@ -342,6 +403,10 @@ def upsert_status(
     file_path: str | None = None,
     sha256: str | None = None,
     size_bytes: int | None = None,
+    media_key: str | None = None,
+    content_fingerprint: str | None = None,
+    duration_ms: int | None = None,
+    duplicate_of_id: int | None = None,
     quality: str | None = None,
     error: str | None = None,
 ) -> None:
@@ -350,8 +415,9 @@ def upsert_status(
         """
         INSERT INTO downloads (
           original_url, direct_video_url, tweet_id, published_at, final_filename, file_path,
-          sha256, size_bytes, quality, status, error, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          sha256, size_bytes, media_key, content_fingerprint, duration_ms, duplicate_of_id,
+          quality, status, error, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(original_url) DO UPDATE SET
           direct_video_url=excluded.direct_video_url,
           tweet_id=excluded.tweet_id,
@@ -360,6 +426,10 @@ def upsert_status(
           file_path=excluded.file_path,
           sha256=excluded.sha256,
           size_bytes=excluded.size_bytes,
+          media_key=excluded.media_key,
+          content_fingerprint=excluded.content_fingerprint,
+          duration_ms=excluded.duration_ms,
+          duplicate_of_id=excluded.duplicate_of_id,
           quality=excluded.quality,
           status=excluded.status,
           error=excluded.error,
@@ -374,6 +444,10 @@ def upsert_status(
             file_path,
             sha256,
             size_bytes,
+            media_key,
+            content_fingerprint,
+            duration_ms,
+            duplicate_of_id,
             quality,
             status,
             error,
@@ -382,6 +456,35 @@ def upsert_status(
         ),
     )
     con.commit()
+
+
+def record_duplicate(
+    con: sqlite3.Connection,
+    candidate: Candidate,
+    duplicate: sqlite3.Row,
+    *,
+    direct_video_url: str | None,
+    media_key: str | None,
+    content_fingerprint: str | None = None,
+    duration_ms: int | None = None,
+    reason: str,
+) -> None:
+    upsert_status(
+        con,
+        candidate,
+        "skipped_duplicate",
+        direct_video_url=direct_video_url,
+        final_filename=duplicate["final_filename"],
+        file_path=duplicate["file_path"],
+        sha256=duplicate["sha256"],
+        size_bytes=duplicate["size_bytes"],
+        media_key=media_key or duplicate["media_key"],
+        content_fingerprint=content_fingerprint or duplicate["content_fingerprint"],
+        duration_ms=duration_ms or duplicate["duration_ms"],
+        duplicate_of_id=duplicate["id"],
+        quality=duplicate["quality"],
+        error=reason,
+    )
 
 
 def ytdlp_base_args(args: argparse.Namespace) -> list[str]:
@@ -414,6 +517,31 @@ def metadata_has_video(meta: dict[str, Any]) -> bool:
     if any((f.get("vcodec") or "none") != "none" for f in formats):
         return True
     return bool(meta.get("url") and meta.get("ext") in {"mp4", "webm", "mkv", "mov"})
+
+
+def media_key_from_url(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    match = X_MEDIA_URL_RE.search(value)
+    if not match:
+        return None
+    kind = match.group("kind").lower()
+    asset = urllib.parse.unquote(match.group("asset"))
+    return f"{kind}:{asset}"
+
+
+def metadata_media_key(meta: dict[str, Any]) -> str | None:
+    urls: list[Any] = [meta.get("url"), meta.get("manifest_url")]
+    for field in ("formats", "requested_formats", "requested_downloads"):
+        for item in meta.get(field) or []:
+            if isinstance(item, dict):
+                urls.extend((item.get("url"), item.get("manifest_url")))
+    keys = {key for value in urls if (key := media_key_from_url(value))}
+    if not keys:
+        return None
+    # A Twitter/X asset normally exposes one stable asset id through many format URLs.
+    # Sorting keeps the choice deterministic if yt-dlp returns more than one candidate.
+    return sorted(keys)[0]
 
 
 def stable_title(meta: dict[str, Any], candidate: Candidate) -> str:
@@ -485,6 +613,170 @@ def sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
+def ffprobe_duration_ms(path: Path) -> int | None:
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        return None
+    result = run(
+        [ffprobe, "-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", str(path)],
+        timeout=60,
+    )
+    if result.returncode != 0:
+        return None
+    with contextlib.suppress(ValueError, IndexError):
+        seconds = float(result.stdout.strip().splitlines()[0])
+        if seconds > 0:
+            return int(round(seconds * 1000))
+    return None
+
+
+def frame_dhash_signature(path: Path, timestamp: float) -> str | None:
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        return None
+    try:
+        result = subprocess.run(
+            [
+                ffmpeg,
+                "-v",
+                "error",
+                "-i",
+                str(path),
+                "-ss",
+                f"{max(0.0, timestamp):.3f}",
+                "-frames:v",
+                "1",
+                "-vf",
+                "scale=17:16:flags=area,format=gray",
+                "-f",
+                "rawvideo",
+                "pipe:1",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=90,
+        )
+    except subprocess.TimeoutExpired:
+        return None
+    frame_size = 17 * 16
+    if result.returncode != 0 or len(result.stdout) < frame_size:
+        return None
+    frame = result.stdout[:frame_size]
+    bits = 0
+    for y in range(16):
+        base = y * 17
+        for x in range(16):
+            bits = (bits << 1) | int(frame[base + x] > frame[base + x + 1])
+    mean = sum(frame) // frame_size
+    variance = sum((value - mean) ** 2 for value in frame) // frame_size
+    stdev = min(255, int(variance ** 0.5))
+    return f"{bits:064x}:{mean:02x}:{stdev:02x}"
+
+
+def video_content_fingerprint(path: Path, duration_ms: int | None) -> str | None:
+    if not duration_ms or duration_ms <= 0:
+        return None
+    duration = duration_ms / 1000.0
+    upper = max(0.0, duration - 0.05)
+    timestamps = [min(upper, duration * fraction) for fraction in (0.10, 0.30, 0.50, 0.70, 0.90)]
+    parts: list[str] = []
+    for timestamp in timestamps:
+        signature = frame_dhash_signature(path, timestamp)
+        if not signature:
+            return None
+        parts.append(signature)
+    return FINGERPRINT_PREFIX + "|" + "|".join(parts)
+
+
+def parse_content_fingerprint(value: str | None) -> list[tuple[int, int, int]] | None:
+    if not value:
+        return None
+    parts = value.split("|")
+    if len(parts) != FINGERPRINT_FRAME_COUNT + 1 or parts[0] != FINGERPRINT_PREFIX:
+        return None
+    decoded: list[tuple[int, int, int]] = []
+    try:
+        for part in parts[1:]:
+            hash_hex, mean_hex, stdev_hex = part.split(":")
+            decoded.append((int(hash_hex, 16), int(mean_hex, 16), int(stdev_hex, 16)))
+    except (ValueError, TypeError):
+        return None
+    return decoded
+
+
+def fingerprints_match(first: str | None, second: str | None) -> bool:
+    left = parse_content_fingerprint(first)
+    right = parse_content_fingerprint(second)
+    if not left or not right or len(left) != len(right):
+        return False
+    hamming = [(a[0] ^ b[0]).bit_count() for a, b in zip(left, right)]
+    mean_delta = [abs(a[1] - b[1]) for a, b in zip(left, right)]
+    stdev_delta = [abs(a[2] - b[2]) for a, b in zip(left, right)]
+    # Conservative thresholds: false positives are worse than retaining one duplicate.
+    return (
+        sum(hamming) / len(hamming) <= 18
+        and max(hamming) <= 40
+        and sum(mean_delta) / len(mean_delta) <= 10
+        and sum(stdev_delta) / len(stdev_delta) <= 12
+    )
+
+
+def downloaded_by_fingerprint(
+    con: sqlite3.Connection,
+    content_fingerprint: str,
+    duration_ms: int,
+) -> sqlite3.Row | None:
+    tolerance_ms = min(1500, max(500, int(duration_ms * 0.015)))
+    rows = con.execute(
+        """
+        SELECT * FROM downloads
+        WHERE status='downloaded'
+          AND content_fingerprint IS NOT NULL
+          AND duration_ms BETWEEN ? AND ?
+        ORDER BY updated_at DESC
+        """,
+        (duration_ms - tolerance_ms, duration_ms + tolerance_ms),
+    ).fetchall()
+    for row in rows:
+        if row_has_existing_file(row) and fingerprints_match(content_fingerprint, row["content_fingerprint"]):
+            return row
+    return None
+
+
+def reindex_content(con: sqlite3.Connection, logfile: Path | None) -> tuple[int, int, int, int]:
+    rows = con.execute(
+        "SELECT * FROM downloads WHERE status='downloaded' ORDER BY id"
+    ).fetchall()
+    updated = missing = failed = 0
+    for row in rows:
+        file_path = row["file_path"]
+        if not file_path or not Path(file_path).exists():
+            missing += 1
+            continue
+        path = Path(file_path)
+        try:
+            sha256 = row["sha256"] or sha256_file(path)
+            duration_ms = row["duration_ms"] or ffprobe_duration_ms(path)
+            fingerprint = row["content_fingerprint"] or video_content_fingerprint(path, duration_ms)
+            media_key = row["media_key"] or media_key_from_url(row["direct_video_url"])
+            size_bytes = row["size_bytes"] or path.stat().st_size
+            con.execute(
+                """
+                UPDATE downloads
+                SET sha256=?, size_bytes=?, media_key=?, content_fingerprint=?, duration_ms=?, updated_at=?
+                WHERE id=?
+                """,
+                (sha256, size_bytes, media_key, fingerprint, duration_ms, utc_now(), row["id"]),
+            )
+            con.commit()
+            updated += 1
+        except Exception as exc:
+            failed += 1
+            log(f"reindex failed id={row['id']} file={path} error={exc}", logfile)
+    return len(rows), updated, missing, failed
+
+
 def download_one(args: argparse.Namespace, con: sqlite3.Connection, candidate: Candidate, logfile: Path | None, summary: Summary) -> None:
     summary.posts_analyzed += 1
     row = already_downloaded(con, candidate)
@@ -503,6 +795,25 @@ def download_one(args: argparse.Namespace, con: sqlite3.Connection, candidate: C
             raise RuntimeError("no video formats found")
         summary.videos_found += 1
         direct = meta.get("url")
+        media_key = metadata_media_key(meta)
+        if media_key:
+            duplicate = downloaded_by_media_key(con, media_key)
+            if duplicate:
+                record_duplicate(
+                    con,
+                    candidate,
+                    duplicate,
+                    direct_video_url=direct,
+                    media_key=media_key,
+                    reason=f"duplicate media asset: {media_key}",
+                )
+                summary.skipped_duplicate += 1
+                log(
+                    f"skip duplicate media_key={media_key} tweet_id={candidate.tweet_id} "
+                    f"canonical={duplicate['file_path']}",
+                    logfile,
+                )
+                return
         title = stable_title(meta, candidate)
         if args.dry_run:
             summary.dry_run_matches += 1
@@ -535,6 +846,33 @@ def download_one(args: argparse.Namespace, con: sqlite3.Connection, candidate: C
         if final is None or not final.exists():
             raise RuntimeError("download completed but final file was not found")
         final, quality = ensure_max_480(final, logfile)
+        sha256 = sha256_file(final)
+        duration_ms = ffprobe_duration_ms(final)
+        content_fingerprint = video_content_fingerprint(final, duration_ms)
+        duplicate = downloaded_by_sha256(con, sha256)
+        duplicate_reason = "duplicate exact content: sha256"
+        if not duplicate and content_fingerprint and duration_ms:
+            duplicate = downloaded_by_fingerprint(con, content_fingerprint, duration_ms)
+            duplicate_reason = "duplicate perceptual video content"
+        if duplicate:
+            final.unlink(missing_ok=True)
+            record_duplicate(
+                con,
+                candidate,
+                duplicate,
+                direct_video_url=direct,
+                media_key=media_key,
+                content_fingerprint=content_fingerprint,
+                duration_ms=duration_ms,
+                reason=duplicate_reason,
+            )
+            summary.skipped_duplicate += 1
+            log(
+                f"removed duplicate tweet_id={candidate.tweet_id} reason={duplicate_reason} "
+                f"canonical={duplicate['file_path']}",
+                logfile,
+            )
+            return
         upsert_status(
             con,
             candidate,
@@ -542,8 +880,12 @@ def download_one(args: argparse.Namespace, con: sqlite3.Connection, candidate: C
             direct_video_url=direct,
             final_filename=final.name,
             file_path=str(final),
-            sha256=sha256_file(final),
+            sha256=sha256,
             size_bytes=final.stat().st_size,
+            media_key=media_key,
+            content_fingerprint=content_fingerprint,
+            duration_ms=duration_ms,
+            duplicate_of_id=None,
             quality=quality,
             error=None,
         )
@@ -570,6 +912,12 @@ def retry_failed_candidates(con: sqlite3.Connection) -> list[Candidate]:
 
 def print_status(con: sqlite3.Connection, output_dir: Path, db_path: Path) -> None:
     counts = {row["status"]: row["n"] for row in con.execute("SELECT status, COUNT(*) n FROM downloads GROUP BY status")}
+    indexed = con.execute(
+        "SELECT COUNT(*) FROM downloads WHERE status='downloaded' AND content_fingerprint IS NOT NULL"
+    ).fetchone()[0]
+    media_indexed = con.execute(
+        "SELECT COUNT(*) FROM downloads WHERE status='downloaded' AND media_key IS NOT NULL"
+    ).fetchone()[0]
     size = sum(p.stat().st_size for p in output_dir.glob("**/*") if p.is_file()) if output_dir.exists() else 0
     print(f"version: {VERSION}")
     print(f"db: {db_path}")
@@ -578,6 +926,8 @@ def print_status(con: sqlite3.Connection, output_dir: Path, db_path: Path) -> No
     print(f"downloaded: {counts.get('downloaded', 0)}")
     print(f"skipped_duplicate: {counts.get('skipped_duplicate', 0)}")
     print(f"failed: {counts.get('failed', 0)}")
+    print(f"content_fingerprint_indexed: {indexed}")
+    print(f"media_key_indexed: {media_indexed}")
     print(f"output_size_bytes: {size}")
 
 
@@ -597,6 +947,11 @@ def parse_args() -> argparse.Namespace:
     action.add_argument("--status", action="store_true", help="show DB and output summary")
     action.add_argument("--list-failed", action="store_true", help="list failed DB rows")
     action.add_argument("--retry-failed", action="store_true", help="retry only failed rows")
+    action.add_argument(
+        "--reindex-content",
+        action="store_true",
+        help="backfill SHA/media/perceptual fingerprints for existing downloaded files",
+    )
     parser.add_argument("--cookies-mode", choices=["auto", "firefox", "manual", "none"], default="auto")
     parser.add_argument("--firefox-profile", help="optional Firefox profile path/name for yt-dlp cookies")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
@@ -616,6 +971,13 @@ def main() -> int:
     if args.list_failed:
         list_failed(con)
         return 0
+    if args.reindex_content:
+        scanned, updated, missing, failed = reindex_content(con, logfile)
+        print(f"reindex scanned: {scanned}")
+        print(f"reindex updated: {updated}")
+        print(f"reindex missing_files: {missing}")
+        print(f"reindex failed: {failed}")
+        return 0 if failed == 0 else 1
     if args.cookies_mode == "manual":
         print("Manual login mode: open Firefox, log in to X, then rerun with --cookies-mode firefox or auto.", file=sys.stderr)
         return 2

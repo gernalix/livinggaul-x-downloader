@@ -14,6 +14,7 @@ livinggaul-x-downloader --dry-run
 livinggaul-x-downloader --status
 livinggaul-x-downloader --list-failed
 livinggaul-x-downloader --retry-failed
+livinggaul-x-downloader --reindex-content
 ```
 
 Cookie modes:
@@ -39,9 +40,21 @@ livinggaul-x-downloader --run --url-file urls.txt
 
 The downloader still deduplicates through SQLite and the yt-dlp archive.
 
+## Content deduplication
+
+Version 0.2.0 also deduplicates videos independently of the X post URL:
+
+- before download it extracts a stable key from `video.twimg.com` asset URLs when available;
+- after download it checks SHA-256 for byte-identical files;
+- as a conservative fallback it compares five perceptual dHash frame signatures plus duration/luminance statistics, so straightforward X re-encodes can be recognized;
+- when a duplicate is detected after transfer, the new file is deleted and the database row points to the canonical existing download;
+- `--reindex-content` backfills these identifiers for files downloaded by older versions.
+
+File size is stored as metadata but is not treated as a unique identifier.
+
 ## Versioning
 
-- Current version: `0.1.3`
+- Current version: `0.2.0`
 - Prompt: `#392814`
 - Script first line keeps the version marker.
 

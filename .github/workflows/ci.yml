@@ -31,3 +31,5 @@ jobs:
         run: python -m py_compile livinggaul-x-downloader
       - name: CLI smoke test
         run: python livinggaul-x-downloader --help >/dev/null
+      - name: Unit tests
+        run: python -m unittest discover -s tests -p 'test_*.py'
