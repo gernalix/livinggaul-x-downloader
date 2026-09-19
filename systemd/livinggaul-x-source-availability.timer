@@ -1,0 +1,11 @@
+[Unit]
+Description=Hourly LivingGaul X source availability refresh
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+AccuracySec=1min
+Unit=livinggaul-x-source-availability.service
+
+[Install]
+WantedBy=timers.target

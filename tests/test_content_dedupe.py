@@ -284,6 +284,46 @@ class ContentDedupeTests(unittest.TestCase):
             )
             con.close()
 
+    def test_availability_refresh_prioritizes_never_and_oldest_checked(self):
+        connect_db = MODULE["connect_db"]
+        Candidate = MODULE["Candidate"]
+        upsert_status = MODULE["upsert_status"]
+        refresh = MODULE["refresh_source_availability"]
+
+        class Args:
+            cookies_mode = "none"
+            firefox_profile = None
+
+        with tempfile.TemporaryDirectory() as tmp:
+            con = connect_db(Path(tmp) / "history.sqlite")
+            ids = []
+            for suffix in ("01", "02", "03"):
+                tweet_id = f"12345678901234569{suffix}"
+                ids.append(tweet_id)
+                upsert_status(
+                    con,
+                    Candidate(tweet_id=tweet_id, url=f"https://x.com/LivingGaul/status/{tweet_id}"),
+                    "downloaded",
+                )
+            con.execute(
+                "UPDATE downloads SET source_checked_at='2026-09-19T10:00:00Z' WHERE tweet_id=?",
+                (ids[0],),
+            )
+            con.execute(
+                "UPDATE downloads SET source_checked_at='2026-09-19T09:00:00Z' WHERE tweet_id=?",
+                (ids[1],),
+            )
+            con.commit()
+            seen = []
+
+            def fake_probe(args, candidate, logfile):
+                seen.append(candidate.tweet_id)
+                return "available", None
+
+            refresh(Args(), con, None, probe=fake_probe)
+            self.assertEqual(seen, [ids[2], ids[1], ids[0]])
+            con.close()
+
 
 if __name__ == "__main__":
     unittest.main()

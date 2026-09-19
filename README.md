@@ -43,7 +43,7 @@ The downloader still deduplicates through SQLite and the yt-dlp archive.
 
 ## Content deduplication
 
-Version 0.4.0 also deduplicates videos independently of the X post URL:
+Version 0.4.1 also deduplicates videos independently of the X post URL:
 
 - before download it extracts a stable key from `video.twimg.com` asset URLs when available;
 - after download it checks SHA-256 for byte-identical files;
@@ -55,7 +55,7 @@ File size is stored as metadata but is not treated as a unique identifier.
 
 ## Metadata catalog
 
-Version 0.4.0 expands the SQLite history into a metadata catalog. Each processed X video can store:
+Version 0.4.1 expands the SQLite history into a metadata catalog. Each processed X video can store:
 
 - X/yt-dlp metadata: uploader, uploader id, post text, title, publication/upload time, and one static snapshot of views, likes, reposts, and comments when exposed by X;
 - final-file metadata from `ffprobe`: width, height, exact FPS numerator/denominator, video/audio codecs and bitrates, container, pixel format, sample rate, channels, duration, and size;
@@ -92,7 +92,7 @@ Because `download_date` falls back to the row creation date when an older row ha
 
 ### Source availability percentage
 
-Version 0.4.0 can also check whether the original X link for each already-downloaded video still exposes a downloadable video:
+Version 0.4.1 can also check whether the original X link for each already-downloaded video still exposes a downloadable video:
 
 ```bash
 livinggaul-x-downloader --check-source-availability
@@ -115,9 +115,36 @@ Its value is:
 
 Rows that are `unknown` or have never been checked remain in the denominator but not the numerator. When there are no downloaded videos, the value is NULL rather than a misleading 0%. The value is only as fresh as the last `--check-source-availability` run.
 
+### Hourly Fedora systemd timer
+
+The repo includes a resilient **systemd user service + timer** for this exact availability check:
+
+```bash
+systemd/install-user-service.sh
+```
+
+The installer:
+
+- installs the units under `~/.config/systemd/user/`;
+- enables an hourly calendar timer with `Persistent=true`, so a missed run while the machine is off is caught after startup;
+- enables systemd **linger** for the user, so the timer continues without an active graphical/login session;
+- runs one smoke execution immediately;
+- keeps output in the systemd journal.
+
+The service uses a filesystem lock to prevent overlapping availability runs, retries failed executions after 5 minutes with systemd rate limiting, kills a hung run after 50 minutes, and checks never-seen/least-recently-checked rows first so partial runs eventually make progress.
+
+Useful commands:
+
+```bash
+systemctl --user status livinggaul-x-source-availability.timer
+systemctl --user status livinggaul-x-source-availability.service
+systemctl --user list-timers livinggaul-x-source-availability.timer
+journalctl --user -u livinggaul-x-source-availability.service
+```
+
 ## Versioning
 
-- Current version: `0.4.0`
+- Current version: `0.4.1`
 - Prompt: `#392814`
 - Script first line keeps the version marker.
 
