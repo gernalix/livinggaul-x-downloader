@@ -1,0 +1,120 @@
+schema_version: c2.project-capsule.v1
+identity:
+  project_id: 69
+  slug: livinggaul-x-downloader
+  repository_id: R0069
+scope:
+  purpose: Download and catalog videos posted or shared by the configured X profile, with local retry history, content deduplication, and source-availability checks.
+  boundaries:
+    - MegaVault owns canonical project identity and repository location; C2 owns work-item lifecycle.
+    - Video files, browser cookies, logs, archive history, and SQLite state remain in user-owned paths outside Git.
+    - Source-availability checks do not download video, while normal run/retry commands may download or delete duplicate local files.
+repository:
+  canonical_workdir: ~/projects/livinggaul-x-downloader
+  branch_policy: Canonical repository follows origin/master; make changes in isolated repo-task worktrees and integrate through the guarded single-writer lane.
+architecture:
+  summary: A Python CLI discovers X posts, downloads bounded-quality video with yt-dlp, records metadata in a local SQLite database, deduplicates downloads by media key/hash/fingerprint, and can check source availability with a user systemd timer.
+  entrypoints:
+    - livinggaul-x-downloader
+    - systemd/install-user-service.sh
+  important_paths:
+    - livinggaul-x-downloader
+    - systemd
+    - tests
+    - dev/ai
+dependencies:
+  - name: Python 3
+    purpose: CLI, local metadata catalog, migration and tests.
+  - name: yt-dlp
+    purpose: Discover or download videos and probe source availability.
+  - name: gallery-dl
+    purpose: Optional X timeline discovery.
+  - name: ffmpeg and ffprobe
+    purpose: Convert media when needed and inspect downloaded file metadata.
+  - name: Firefox cookie store
+    purpose: Optional browser-authenticated access through yt-dlp cookies-from-browser; cookie values must remain private and must never be committed or printed.
+  - name: systemd user manager
+    purpose: Optional hourly source-availability check using the registered user timer.
+data:
+  schema: User-local SQLite schema version 4 at ~/.local/state/livinggaul-x-downloader/download_history.sqlite stores download rows, normalized X/file metadata, immutable raw yt-dlp metadata snapshots, source availability, and duplicate links; video_catalog and source_unavailable_percentage are derived views. Media outputs and yt-dlp archive are outside the repository.
+  migrations: livinggaul-x-downloader.connect_db creates tables, indexes, views, and upgrades PRAGMA user_version; the tests exercise the schema-v4 migration using temporary databases.
+runtime:
+  services:
+    - "livinggaul-x-source-availability.service (MegaVault inventory: enabled unit; service inactive; result success)"
+  timers:
+    - "livinggaul-x-source-availability.timer (MegaVault inventory: active/waiting)"
+  containers: []
+devices: []
+commands:
+  setup:
+    not_applicable: Runtime dependencies and any user-level package install are managed outside the repository; no setup or virtual-environment script is defined.
+  build:
+    not_applicable: The application is a Python script and systemd user unit; no compiled build artifact is produced.
+  test_targeted:
+    argv: [python3, -B, -m, unittest, discover, -s, tests, -p, test_content_dedupe.py, -q]
+    cwd: .
+  test_full:
+    argv: [python3, -B, -m, unittest, discover, -s, tests, -q]
+    cwd: .
+  lint:
+    argv: [git, diff, --check]
+    cwd: .
+  deploy_install:
+    argv: [bash, systemd/install-user-service.sh]
+    cwd: .
+  smoke:
+    not_applicable: A live run or availability probe contacts X/Nitter and reads/writes user-local video or SQLite state; this is a separately gated operation.
+  verify:
+    fast:
+      argv: [python3, ~/projects/codex-roadmap/tools/project_capsule.py, --repo, ., --mode, FAST]
+      cwd: .
+    full:
+      argv: [python3, ~/projects/codex-roadmap/tools/project_capsule.py, --repo, ., --mode, FULL]
+      cwd: .
+safety:
+  invariants:
+    - Never store, print, or commit browser cookie values, passwords, tokens, downloaded media, logs, or user-local state.
+    - Keep media outputs, SQLite history, and yt-dlp archive outside Git in their documented user-local paths.
+    - Source-availability results distinguish permanent unavailability from transient or ambiguous failures.
+    - Never run downloader or availability commands against the user's live profile during source validation.
+  risky_operations:
+    - "--run and --retry-failed can access authenticated external sources, write video files, update SQLite state, and delete duplicate transfers."
+    - "--check-source-availability makes network probes and updates the live history database even though it does not download media."
+    - "systemd/install-user-service.sh enables a persistent user timer, may enable linger, and immediately runs a live probe; it is not a test command."
+  recovery:
+    - The SQLite database, yt-dlp archive, logs, and downloaded videos remain under user-local state/output paths and are not managed by this repository.
+    - Reindexing rebuilds file-derived metadata from local videos; preserve the original files and database before any recovery or cleanup operation.
+acceptance:
+  - Capsule FAST and FULL validators pass against the reviewed integrated repository head.
+  - Targeted and full tests pass with temporary database fixtures and without live network or user data access.
+  - Live download, source-availability operation, timer installation, and media recovery are documented as separately gated.
+references:
+  megavault: ~/MegaVault/megavault.sqlite
+  c2: ~/projects/codex-roadmap/roadmap.sqlite
+freshness:
+  reviewed_commit: 7b3b263ce9aa52359c46106a6beeba58851e7700
+  watch_paths:
+    - livinggaul-x-downloader
+    - tests
+    - systemd
+    - dev/ai
+    - README.md
+    - VERSION
+artifacts:
+  agents: AGENTS.md
+validation_hooks:
+  - id: focused-content-tests
+    argv: [python3, -B, -m, unittest, discover, -s, tests, -p, test_content_dedupe.py, -q]
+    cwd: .
+    safe: true
+  - id: full-unit-tests
+    argv: [python3, -B, -m, unittest, discover, -s, tests, -q]
+    cwd: .
+    safe: true
+  - id: user-unit-installer-syntax
+    argv: [bash, -n, systemd/install-user-service.sh]
+    cwd: .
+    safe: true
+change_verification:
+  - paths: [livinggaul-x-downloader, tests/**, systemd/**, dev/ai/**, README.md, VERSION, AGENTS.md, project-capsule.yaml]
+    commands: [test_targeted]
