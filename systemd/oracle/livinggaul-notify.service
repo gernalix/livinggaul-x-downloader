@@ -1,0 +1,46 @@
+[Unit]
+Description=LivingGaul durable Telegram outbox
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=1h
+StartLimitBurst=3
+
+[Service]
+Type=oneshot
+User=livinggaul
+Group=livinggaul
+WorkingDirectory=/srv/livinggaul/repo
+Environment=HOME=/home/livinggaul
+Environment=PATH=/srv/livinggaul/venv/bin:/usr/bin:/bin
+Environment=LIVINGGAUL_MANAGED=1
+Environment=LIVINGGAUL_OUTPUT=/home/livinggaul/staging
+Environment=PYTHONUNBUFFERED=1
+LoadCredential=token:/etc/livinggaul/token
+LoadCredential=chat:/etc/livinggaul/chat
+ExecStart=/srv/livinggaul/venv/bin/python /srv/livinggaul/repo/livinggaul_pipeline.py notify
+Restart=on-failure
+RestartSec=10min
+TimeoutStartSec=15min
+TimeoutStopSec=30s
+KillMode=control-group
+UMask=0077
+Nice=15
+CPUQuota=35%
+MemoryHigh=160M
+MemoryMax=220M
+MemorySwapMax=64M
+TasksMax=24
+IOWeight=10
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/livinggaul
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6

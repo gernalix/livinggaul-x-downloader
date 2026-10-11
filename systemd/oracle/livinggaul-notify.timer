@@ -1,0 +1,7 @@
+[Unit]
+Description=Retry pending LivingGaul notifications
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=5min
+[Install]
+WantedBy=timers.target

@@ -175,3 +175,14 @@ journalctl --user -u livinggaul-x-source-availability.service
 
 The repo contains code and docs only. Video files, logs, the yt-dlp archive, and
 SQLite state are intentionally outside the repo.
+
+## Oracle and Seagate deployment
+
+After P4 cutover Oracle owns the writable catalog. Fedora's installed CLI
+forwards status/run/retry/reindex to Oracle; the Fedora pull timer archives
+verified files on Seagate and acknowledges them before Oracle cleanup.
+Archived videos remain downloaded even when absent from Oracle staging.
+
+See [runtime and recovery](docs/oracle-archive.md) and
+[P4 acceptance evidence](docs/P4-task-state.md). Runtime data, video files and
+Telegram credentials stay outside this repository.

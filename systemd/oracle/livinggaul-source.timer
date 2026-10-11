@@ -1,0 +1,9 @@
+[Unit]
+Description=Hourly LivingGaul source refresh
+[Timer]
+OnCalendar=hourly
+Persistent=true
+RandomizedDelaySec=2min
+Unit=livinggaul-source.service
+[Install]
+WantedBy=timers.target

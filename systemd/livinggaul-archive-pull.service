@@ -1,0 +1,18 @@
+[Unit]
+Description=Verified LivingGaul Oracle to Seagate pull
+StartLimitIntervalSec=30min
+StartLimitBurst=3
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 %h/.local/share/livinggaul-x-downloader/livinggaul_pipeline.py pull
+Restart=on-failure
+RestartSec=5min
+TimeoutStartSec=40min
+TimeoutStopSec=30s
+UMask=0077
+Nice=15
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/mnt/Seagate6TB/LivingGaul_X %h/.local/state/livinggaul-x-downloader
