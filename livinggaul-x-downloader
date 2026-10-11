@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# VERSION=0.4.3 prompt=392814 shared-video recovery and Fedora encoder fallback
+# prompt=392814 shared-video recovery and Fedora encoder fallback
 from __future__ import annotations
 
 import argparse
@@ -24,7 +24,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-VERSION = "0.4.3"
+_nv_raw = (Path(__file__).resolve().parent / "NV.txt").read_bytes()
+if not re.fullmatch(rb"[1-9][0-9]*\n", _nv_raw):
+    raise ValueError("NV.txt must contain a positive integer followed by one LF")
+VERSION = _nv_raw[:-1].decode("ascii")
 PROFILE_URL = "https://x.com/LivingGaul"
 SCREEN_NAME = "LivingGaul"
 DEFAULT_OUTPUT_DIR = Path(os.environ.get("LIVINGGAUL_OUTPUT", str(Path.home() / "Videos" / "LivingGaul_X")))
