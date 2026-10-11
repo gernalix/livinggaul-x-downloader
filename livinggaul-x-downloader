@@ -1630,6 +1630,13 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    if (args.status or args.list_failed) and args.db_path.exists():
+        con = sqlite3.connect(args.db_path.resolve().as_uri() + "?mode=ro", uri=True)
+        con.row_factory = sqlite3.Row
+        if args.status: print_status(con, args.output_dir, args.db_path)
+        else: list_failed(con)
+        con.close()
+        return 0
     mkdirs(args.output_dir, args.db_path)
     logfile = log_path()
     con = connect_db(args.db_path)

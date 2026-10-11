@@ -25,4 +25,7 @@ command=['sudo','-n','systemd-run','--wait','--pipe','--collect','--unit=livingg
     '-p','TimeoutStartSec=45min','-p','TimeoutStopSec=30s',
     '/usr/bin/flock','--exclusive','--wait','30','/home/livinggaul/runtime.lock',
     '/srv/livinggaul/venv/bin/python','/srv/livinggaul/repo/livinggaul-x-downloader',action,'--cookies-mode','none']
+if action in ('--status','--list-failed'):
+    index=command.index('/usr/bin/flock')
+    command=command[:index]+command[index+6:]
 raise SystemExit(subprocess.call(['ssh','-F',str(Path.home()/'.ssh/config'),'-o','BatchMode=yes','-o','ConnectTimeout=15','oracle-vm',shlex.join(command)]))
