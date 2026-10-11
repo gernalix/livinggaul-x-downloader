@@ -358,11 +358,11 @@ def connect_db(db_path: Path) -> sqlite3.Connection:
     return con
 
 
-def run(cmd: list[str], timeout: int = 180) -> subprocess.CompletedProcess[str]:
+def run(cmd: list[str], timeout: int = 180, *, text: bool = True) -> subprocess.CompletedProcess[str]:
     if os.environ.get("LIVINGGAUL_MANAGED") != "1":
-        return subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=timeout)
+        return subprocess.run(cmd, text=text, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=timeout)
     pipeline.resource_check(DEFAULT_OUTPUT_DIR)
-    process = subprocess.Popen(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+    process = subprocess.Popen(cmd, text=text, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
     deadline = time.monotonic() + timeout
     try:
         while True:
@@ -1228,9 +1228,10 @@ def frame_dhash_signature(path: Path, timestamp: float) -> str | None:
     if not ffmpeg:
         return None
     try:
-        result = subprocess.run(
+        result = run(
             [
                 ffmpeg,
+                "-threads", "1",
                 "-v",
                 "error",
                 "-i",
@@ -1245,9 +1246,7 @@ def frame_dhash_signature(path: Path, timestamp: float) -> str | None:
                 "rawvideo",
                 "pipe:1",
             ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=False,
+            text=False,
             timeout=90,
         )
     except subprocess.TimeoutExpired:
