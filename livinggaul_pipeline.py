@@ -250,7 +250,7 @@ def transfer_verified(source, final, expected_hash, expected_size, copier):
 
 
 def remote(host, action, payload=None):
-    cmd=['ssh','-o','BatchMode=yes','-o','ConnectTimeout=15',host,'sudo','-n','-u','livinggaul','/srv/livinggaul/venv/bin/python','/srv/livinggaul/repo/livinggaul_pipeline.py',action]
+    cmd=['ssh','-F',str(Path.home()/'.ssh/config'),'-o','BatchMode=yes','-o','ConnectTimeout=15',host,'sudo','-n','-u','livinggaul','/srv/livinggaul/venv/bin/python','/srv/livinggaul/repo/livinggaul_pipeline.py',action]
     result=subprocess.run(cmd,input=json.dumps(payload or {}),text=True,capture_output=True,timeout=180,check=True)
     return json.loads(result.stdout or '{}')
 
@@ -265,13 +265,13 @@ def pull(host, mount):
             raise ValueError('invalid remote staging manifest')
         final=ARCHIVE_ROOT/'videos'/f'{row["id"]}-{row["sha256"]}.mp4'
         def copier(source,target):
-            subprocess.run(['rsync','--partial','--append-verify','--protect-args','--rsync-path=sudo -n -u livinggaul rsync','-e','ssh -o BatchMode=yes -o ConnectTimeout=15',f'{host}:{source}',str(target)],check=True,timeout=1800)
+            subprocess.run(['rsync','--partial','--append-verify','--protect-args','--rsync-path=sudo -n -u livinggaul rsync','-e','ssh -F ' + shlex.quote(str(Path.home()/'.ssh/config')) + ' -o BatchMode=yes -o ConnectTimeout=15',f'{host}:{source}',str(target)],check=True,timeout=1800)
         transfer_verified(row['file_path'],final,row['sha256'],row['size_bytes'],copier)
         require_mount(mount)
         remote(host,'ack',{'id':row['id'],'sha256':row['sha256'],'size':row['size_bytes'],'path':str(final)})
     remote(host,'snapshot')
     recovery=ARCHIVE_ROOT/'recovery'
-    subprocess.run(['rsync','--protect-args','--rsync-path=sudo -n -u livinggaul rsync','-e','ssh -o BatchMode=yes',f'{host}:{ROOT}/export/catalog.sqlite',str(recovery/'catalog.partial')],check=True,timeout=180)
+    subprocess.run(['rsync','--protect-args','--rsync-path=sudo -n -u livinggaul rsync','-e','ssh -F ' + shlex.quote(str(Path.home()/'.ssh/config')) + ' -o BatchMode=yes',f'{host}:{ROOT}/export/catalog.sqlite',str(recovery/'catalog.partial')],check=True,timeout=180)
     verify=sqlite3.connect(recovery/'catalog.partial');verify.row_factory=sqlite3.Row
     assert verify.execute('pragma integrity_check').fetchone()[0]=='ok'
     assert not verify.execute('pragma foreign_key_check').fetchall()
@@ -283,7 +283,7 @@ def pull(host, mount):
     verify.close();os.replace(recovery/'catalog.partial',recovery/'catalog.sqlite')
     (recovery/'manifest.partial').write_text(json.dumps(manifest,indent=2));(recovery/'manifest.partial').chmod(0o600)
     os.replace(recovery/'manifest.partial',recovery/'manifest.json');fsync_dir(recovery)
-    subprocess.run(['rsync','--protect-args','--rsync-path=sudo -n -u livinggaul rsync','-e','ssh -o BatchMode=yes',f'{host}:{ROOT}/.local/state/livinggaul-x-downloader/yt-dlp-download-archive.txt',str(recovery/'yt-dlp-download-archive.txt')],check=True,timeout=180)
+    subprocess.run(['rsync','--protect-args','--rsync-path=sudo -n -u livinggaul rsync','-e','ssh -F ' + shlex.quote(str(Path.home()/'.ssh/config')) + ' -o BatchMode=yes',f'{host}:{ROOT}/.local/state/livinggaul-x-downloader/yt-dlp-download-archive.txt',str(recovery/'yt-dlp-download-archive.txt')],check=True,timeout=180)
 
 
 def main():
