@@ -171,6 +171,8 @@ def reconcile(con, event_id, message_id):
 
 
 def resource_check(path, min_free=4*1024**3, min_mem=100*1024**2):
+    if Path(path) == ROOT/'staging' and sum(p.stat().st_size for p in Path(path).rglob('*') if p.is_file()) > 6*1024**3:
+        raise RuntimeError('resource guard: staging exceeds 6 GiB')
     if shutil.disk_usage(path).free < min_free:
         raise RuntimeError('resource guard: low disk space')
     mem = dict(line.split(':',1) for line in Path('/proc/meminfo').read_text().splitlines())
@@ -308,7 +310,17 @@ def main():
                 row=con.execute("SELECT * FROM downloads WHERE status='downloaded' ORDER BY id LIMIT 1").fetchone()
                 meta=con.execute("SELECT metadata_json FROM metadata_snapshots WHERE download_id=?",(row['id'],)).fetchone()
                 enqueue(con,'P4:test',video_message(row,json.loads(meta[0]) if meta else {},'[TEST] P4 — '),row['id']);con.commit()
+            if args.action == 'notify':
+                try: resource_check(ROOT/'staging')
+                except RuntimeError as exc:
+                    enqueue(con,'resource:' + time.strftime('%Y%m%d%H',time.gmtime()),'LivingGaul sospeso: ' + str(exc));con.commit()
+                for unit in ('livinggaul-download.service','livinggaul-source.service'):
+                    state=subprocess.run(['systemctl','is-failed',unit],text=True,capture_output=True)
+                    if state.stdout.strip() == 'failed':
+                        enqueue(con,'failure:' + unit + ':' + time.strftime('%Y%m%d%H',time.gmtime()),'LivingGaul: errore servizio ' + unit);con.commit()
             drain(con)
+            export=ROOT/'export';export.mkdir(exist_ok=True,mode=0o700)
+            snapshot(con,export/'catalog.sqlite')
             print(json.dumps([dict(r) for r in con.execute('SELECT event_id,state,message_id,error FROM notification_outbox')]))
 
 if __name__=='__main__':

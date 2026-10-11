@@ -1,7 +1,7 @@
 [Unit]
-Description=Daily LivingGaul source refresh
+Description=Hourly LivingGaul source refresh
 [Timer]
-OnCalendar=daily
+OnCalendar=hourly
 Persistent=true
 RandomizedDelaySec=2min
 Unit=livinggaul-source.service

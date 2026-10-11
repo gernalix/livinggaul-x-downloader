@@ -350,7 +350,6 @@ def connect_db(db_path: Path) -> sqlite3.Connection:
         WHERE status='downloaded'
         """
     )
-    pipeline.migrate(con)
     con.execute("PRAGMA user_version=5")
     con.commit()
     with contextlib.suppress(PermissionError):
@@ -849,6 +848,8 @@ def record_duplicate(
 
 def ytdlp_base_args(args: argparse.Namespace, *, use_cookies: bool = True) -> list[str]:
     cmd = [tool_path("yt-dlp"), "--no-playlist", "--retries", "5", "--fragment-retries", "5", "--sleep-requests", "1"]
+    if os.environ.get("LIVINGGAUL_MANAGED") == "1":
+        cmd.extend(["--max-filesize", "512M"])
     if use_cookies:
         cmd.extend(browser_cookie_args(args.cookies_mode, args.firefox_profile))
     return cmd
