@@ -1,0 +1,9 @@
+[Unit]
+Description=Hourly LivingGaul downloads independent of Fedora
+[Timer]
+OnCalendar=hourly
+Persistent=true
+RandomizedDelaySec=2min
+Unit=livinggaul-download.service
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,8 @@
+# Isolated CPython 3.12.15; ffmpeg/ffprobe supplied by Ubuntu.
+certifi==2026.7.22
+charset-normalizer==3.5.2
+gallery-dl==1.32.16
+idna==3.20
+requests==2.34.2
+urllib3==2.8.0
+yt-dlp==2026.8.19

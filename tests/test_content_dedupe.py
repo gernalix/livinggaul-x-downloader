@@ -105,7 +105,7 @@ class ContentDedupeTests(unittest.TestCase):
             self.assertTrue(expected.issubset(columns))
             tables = {row[0] for row in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             self.assertIn("metadata_snapshots", tables)
-            self.assertEqual(con.execute("PRAGMA user_version").fetchone()[0], 4)
+            self.assertEqual(con.execute("PRAGMA user_version").fetchone()[0], 5)
             views = {row[0] for row in con.execute("SELECT name FROM sqlite_master WHERE type='view'")}
             self.assertIn("video_catalog", views)
             self.assertIn("source_unavailable_percentage", views)

@@ -15,6 +15,8 @@ import sqlite3
 import subprocess
 import sys
 import time
+import signal
+import livinggaul_pipeline as pipeline
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -25,7 +27,7 @@ from typing import Any
 VERSION = "0.4.3"
 PROFILE_URL = "https://x.com/LivingGaul"
 SCREEN_NAME = "LivingGaul"
-DEFAULT_OUTPUT_DIR = Path.home() / "Videos" / "LivingGaul_X"
+DEFAULT_OUTPUT_DIR = Path(os.environ.get("LIVINGGAUL_OUTPUT", str(Path.home() / "Videos" / "LivingGaul_X")))
 DEFAULT_STATE_DIR = Path.home() / ".local" / "state" / "livinggaul-x-downloader"
 DEFAULT_DB_PATH = DEFAULT_STATE_DIR / "download_history.sqlite"
 DEFAULT_ARCHIVE = DEFAULT_STATE_DIR / "yt-dlp-download-archive.txt"
@@ -250,6 +252,7 @@ def connect_db(db_path: Path) -> sqlite3.Connection:
         "CREATE INDEX IF NOT EXISTS idx_metadata_download_captured "
         "ON metadata_snapshots(download_id, captured_at DESC)"
     )
+    pipeline.migrate(con)
     con.execute("DROP VIEW IF EXISTS video_catalog")
     con.execute(
         """
@@ -271,6 +274,7 @@ def connect_db(db_path: Path) -> sqlite3.Connection:
           d.direct_video_url,
           d.final_filename,
           d.file_path,
+          d.storage_state, d.archive_path, d.archive_ack_at,
           d.size_bytes,
           CASE WHEN d.size_bytes IS NULL THEN NULL ELSE d.size_bytes / 1000000.0 END AS size_mb,
           CASE WHEN d.size_bytes IS NULL THEN NULL ELSE d.size_bytes / 1048576.0 END AS size_mib,
@@ -346,7 +350,8 @@ def connect_db(db_path: Path) -> sqlite3.Connection:
         WHERE status='downloaded'
         """
     )
-    con.execute("PRAGMA user_version=4")
+    pipeline.migrate(con)
+    con.execute("PRAGMA user_version=5")
     con.commit()
     with contextlib.suppress(PermissionError):
         os.chmod(db_path, 0o600)
@@ -354,7 +359,26 @@ def connect_db(db_path: Path) -> sqlite3.Connection:
 
 
 def run(cmd: list[str], timeout: int = 180) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=timeout)
+    if os.environ.get("LIVINGGAUL_MANAGED") != "1":
+        return subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=timeout)
+    pipeline.resource_check(DEFAULT_OUTPUT_DIR)
+    process = subprocess.Popen(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+    deadline = time.monotonic() + timeout
+    try:
+        while True:
+            try:
+                stdout, stderr = process.communicate(timeout=5)
+                return subprocess.CompletedProcess(cmd, process.returncode, stdout, stderr)
+            except subprocess.TimeoutExpired:
+                pipeline.resource_check(DEFAULT_OUTPUT_DIR)
+                if time.monotonic() >= deadline:
+                    raise subprocess.TimeoutExpired(cmd, timeout)
+    except BaseException:
+        os.killpg(process.pid, signal.SIGTERM)
+        try: process.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGKILL); process.communicate()
+        raise
 
 
 def tool_path(name: str) -> str:
@@ -533,7 +557,7 @@ def candidates_from_url_file(path: Path) -> list[Candidate]:
 
 def row_has_existing_file(row: sqlite3.Row) -> bool:
     file_path = row["file_path"]
-    return bool(file_path and Path(file_path).exists())
+    return pipeline.archived_valid(row) or bool(file_path and Path(file_path).is_file())
 
 
 def downloaded_by_media_key(con: sqlite3.Connection, media_key: str) -> sqlite3.Row | None:
@@ -782,6 +806,12 @@ def upsert_status(
                     json.dumps(source_metadata, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
                 ),
             )
+    if os.environ.get("LIVINGGAUL_MANAGED") == "1":
+        row = con.execute("SELECT * FROM downloads WHERE original_url=?", (candidate.url,)).fetchone()
+        if status == "downloaded":
+            pipeline.record_staged(con, row, source_metadata)
+        elif status == "failed":
+            con.execute("UPDATE downloads SET storage_state='failed' WHERE id=?", (row['id'],))
     con.commit()
 
 
@@ -1314,6 +1344,8 @@ def reindex_content(con: sqlite3.Connection, logfile: Path | None) -> tuple[int,
     updated = missing = failed = 0
     for row in rows:
         file_path = row["file_path"]
+        if pipeline.archived_valid(row):
+            continue
         if not file_path or not Path(file_path).exists():
             missing += 1
             continue
@@ -1396,7 +1428,7 @@ def download_one(args: argparse.Namespace, con: sqlite3.Connection, candidate: C
         if not metadata_has_video(meta):
             raise RuntimeError("no video formats found")
         summary.videos_found += 1
-        direct = meta.get("url")
+        direct = meta.get("url") or next((f.get("url") for f in meta.get("formats", []) if pipeline.safe_url(f.get("url"), "video.twimg.com")), None)
         media_key = metadata_media_key(meta)
         if media_key:
             duplicate = downloaded_by_media_key(con, media_key)
@@ -1499,10 +1531,20 @@ def download_one(args: argparse.Namespace, con: sqlite3.Connection, candidate: C
             error=None,
         )
         summary.downloaded += 1
+        if os.environ.get("LIVINGGAUL_MANAGED") == "1":
+            try:
+                pipeline.drain(con)
+            except Exception:
+                log("Telegram deferred; video and outbox preserved", logfile)
         log(f"downloaded tweet_id={candidate.tweet_id} file={final}", logfile)
     except Exception as exc:
         if not args.dry_run:
             upsert_status(con, candidate, "failed", source_metadata=meta, error=str(exc))
+            if os.environ.get("LIVINGGAUL_MANAGED") == "1" and str(exc).startswith("resource guard:"):
+                pipeline.enqueue(con, "resource:" + utc_now()[:13], "LivingGaul sospeso: " + str(exc))
+                con.commit()
+                try: pipeline.drain(con)
+                except Exception: pass
         summary.failed += 1
         log(f"failed tweet_id={candidate.tweet_id} error={exc}", logfile)
 
@@ -1540,6 +1582,8 @@ def print_status(con: sqlite3.Connection, output_dir: Path, db_path: Path) -> No
     print(f"output_dir: {output_dir}")
     print(f"archive: {DEFAULT_ARCHIVE}")
     print(f"downloaded: {counts.get('downloaded', 0)}")
+    for storage in con.execute("SELECT storage_state,COUNT(*) FROM downloads WHERE status='downloaded' GROUP BY storage_state"):
+        print(f"storage_{storage[0] or 'local'}: {storage[1]}")
     print(f"skipped_duplicate: {counts.get('skipped_duplicate', 0)}")
     print(f"failed: {counts.get('failed', 0)}")
     print(f"content_fingerprint_indexed: {indexed}")
