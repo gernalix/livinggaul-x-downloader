@@ -12,13 +12,13 @@ CPython 3.12.15 under `/srv/livinggaul/runtime/python`, isolated environment
 System Python stays unchanged. Python installation uses Astral uv and its
 python-build-standalone distribution, not an Ubuntu Python replacement.
 
-State: `/var/lib/livinggaul/.local/state/livinggaul-x-downloader/`, staging
-`/var/lib/livinggaul/staging/`, both owner-only. Root-only existing outbound
+State: `/home/livinggaul/.local/state/livinggaul-x-downloader/`, staging
+`/home/livinggaul/staging/`, both owner-only. Root-only existing outbound
 credentials under `/etc/livinggaul/` enter services through `LoadCredential`.
 No cookie transfer, bot creation, incoming Telegram consumer or Pn-bot change.
 
 All Oracle units and SSH queue/ACK/snapshot commands serialize on
-`/var/lib/livinggaul/runtime.lock`. Oneshots use bounded restarts and timeouts,
+`/home/livinggaul/runtime.lock`. Oneshots use bounded restarts and timeouts,
 CPU 35%, memory high 160 MiB/max 220 MiB, swap 64 MiB, low I/O priority.
 Downloads cap individual files at 512 MiB; guard checks available RAM >=100 MiB,
 disk free >=4 GiB and staging <=6 GiB before subprocesses and every 5 seconds
@@ -39,7 +39,10 @@ Archive files use `<id>-<sha256>.mp4` under
 in the catalog. The recovery directory receives an API-consistent SQLite copy,
 a manifest whose archived files are verified locally, and yt-dlp archive.
 `PRAGMA integrity_check` and `foreign_key_check` validate recovery catalogs.
-Oracle's notification cycles also export consistent catalog snapshots.
+Oracle's notification cycles also export consistent catalog snapshots. State and
+staging reside under /home/livinggaul so the existing restic /home backup includes
+them without changing its scope or service. Restore the API-consistent export,
+not a potentially live catalog copy.
 
 Each successful new video and its Telegram event commit together. Historical
 imports/dry-run/duplicates never emit success events. Messages contain the

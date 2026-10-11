@@ -21,7 +21,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-ROOT = Path('/var/lib/livinggaul')
+ROOT = Path('/home/livinggaul')
 DB = ROOT / '.local/state/livinggaul-x-downloader/download_history.sqlite'
 ARCHIVE_ROOT = Path('/mnt/Seagate6TB/LivingGaul_X')
 
@@ -99,7 +99,7 @@ def enqueue(con, event_id, text, download_id=None):
 
 def record_staged(con, row, metadata):
     con.execute("UPDATE downloads SET storage_state='staged' WHERE id=?", (row['id'],))
-    enqueue(con, f"download:{row['id']}:{row['sha256']}", video_message(row, metadata), row['id'])
+    enqueue(con, f"download:{row['id']}:{row['sha256']}", video_message(row, metadata, os.environ.get('LIVINGGAUL_NOTIFY_PREFIX','')), row['id'])
 
 
 def credentials():

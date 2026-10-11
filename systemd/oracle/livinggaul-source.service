@@ -10,14 +10,14 @@ Type=oneshot
 User=livinggaul
 Group=livinggaul
 WorkingDirectory=/srv/livinggaul/repo
-Environment=HOME=/var/lib/livinggaul
+Environment=HOME=/home/livinggaul
 Environment=PATH=/srv/livinggaul/venv/bin:/usr/bin:/bin
 Environment=LIVINGGAUL_MANAGED=1
-Environment=LIVINGGAUL_OUTPUT=/var/lib/livinggaul/staging
+Environment=LIVINGGAUL_OUTPUT=/home/livinggaul/staging
 Environment=PYTHONUNBUFFERED=1
 LoadCredential=token:/etc/livinggaul/token
 LoadCredential=chat:/etc/livinggaul/chat
-ExecStart=/usr/bin/flock --exclusive --wait 30 /var/lib/livinggaul/runtime.lock /srv/livinggaul/venv/bin/python /srv/livinggaul/repo/livinggaul-x-downloader --check-source-availability --cookies-mode none
+ExecStart=/usr/bin/flock --exclusive --wait 30 /home/livinggaul/runtime.lock /srv/livinggaul/venv/bin/python /srv/livinggaul/repo/livinggaul-x-downloader --check-source-availability --cookies-mode none
 Restart=on-failure
 RestartSec=10min
 TimeoutStartSec=45min
@@ -35,8 +35,8 @@ NoNewPrivileges=true
 PrivateTmp=true
 PrivateDevices=true
 ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=/var/lib/livinggaul
+ProtectHome=read-only
+ReadWritePaths=/home/livinggaul
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
