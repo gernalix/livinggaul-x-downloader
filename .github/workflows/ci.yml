@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [master]
+    branches: [master, task/P109-catalog]
     paths-ignore:
       - '**/*.md'
       - 'reports/**'
@@ -20,7 +20,7 @@ concurrency:
 
 jobs:
   smoke:
-    runs-on: ubuntu-latest
+    runs-on: ${{ ((github.event_name == 'pull_request' && github.event.pull_request.head.ref == 'task/P109-catalog') || (github.event_name == 'push' && github.ref == 'refs/heads/task/P109-catalog')) && 'p113-69-livinggaul-x' || 'ubuntu-latest' }}
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
