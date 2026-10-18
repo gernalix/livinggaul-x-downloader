@@ -1,0 +1,31 @@
+#!/usr/bin/env python3
+"""Fedora CLI proxy for the sole Oracle catalog owner after cutover."""
+import argparse
+from pathlib import Path
+import shlex
+import subprocess
+import uuid
+
+parser=argparse.ArgumentParser(description=__doc__)
+actions=parser.add_mutually_exclusive_group(required=True)
+for name in ('run','dry-run','status','list-failed','retry-failed','reindex-content','check-source-availability'):
+    actions.add_argument('--'+name,action='store_true')
+args=parser.parse_args()
+action=next('--'+name.replace('_','-') for name,value in vars(args).items() if value)
+command=['sudo','-n','systemd-run','--wait','--pipe','--collect','--unit=livinggaul-cli-'+uuid.uuid4().hex[:12],
+    '-p','User=livinggaul','-p','Environment=HOME=/home/livinggaul',
+    '-p','Environment=PATH=/srv/livinggaul/venv/bin:/usr/bin:/bin',
+    '-p','Environment=LIVINGGAUL_OUTPUT=/home/livinggaul/staging',
+    '-p','Environment=LIVINGGAUL_MANAGED=1',
+    '-p','LoadCredential=token:/etc/livinggaul/token','-p','LoadCredential=chat:/etc/livinggaul/chat',
+    '-p','UMask=0077','-p','CPUQuota=35%','-p','MemoryMax=220M',
+    '-p','MemorySwapMax=64M','-p','TasksMax=24','-p','Nice=15',
+    '-p','NoNewPrivileges=true','-p','ProtectSystem=strict','-p','ProtectHome=read-only',
+    '-p','ReadWritePaths=/home/livinggaul','-p','PrivateTmp=true',
+    '-p','TimeoutStartSec=45min','-p','TimeoutStopSec=30s',
+    '/usr/bin/flock','--exclusive','--wait','30','/home/livinggaul/runtime.lock',
+    '/srv/livinggaul/venv/bin/python','/srv/livinggaul/repo/livinggaul-x-downloader',action,'--cookies-mode','none']
+if action in ('--status','--list-failed'):
+    index=command.index('/usr/bin/flock')
+    command=command[:index]+command[index+6:]
+raise SystemExit(subprocess.call(['ssh','-F',str(Path.home()/'.ssh/config'),'-o','BatchMode=yes','-o','ConnectTimeout=15','oracle-vm',shlex.join(command)]))

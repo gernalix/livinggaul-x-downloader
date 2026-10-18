@@ -41,6 +41,17 @@ livinggaul-x-downloader --run --url-file urls.txt
 
 The downloader still deduplicates through SQLite and the yt-dlp archive.
 
+When a post embeds a video from another X account, version 0.4.3 falls back
+to public post metadata from `api.fxtwitter.com` to resolve the quoted video.
+Only public post IDs are sent to this third party; browser cookies are not sent.
+Video files are downloaded from `video.twimg.com`. The best MP4 at or below
+480 pixels in height is preferred; larger-only videos are downscaled using
+an available Fedora-compatible FFmpeg encoder.
+
+For a full historical timeline, gallery-dl needs an authenticated X browser
+session. Without usable cookies, the public X HTML fallback may expose only
+the most recent few posts. Use `--url-file` for additional known post links.
+
 ## Content deduplication
 
 Version 0.4.2 also deduplicates videos independently of the X post URL:
@@ -164,3 +175,14 @@ journalctl --user -u livinggaul-x-source-availability.service
 
 The repo contains code and docs only. Video files, logs, the yt-dlp archive, and
 SQLite state are intentionally outside the repo.
+
+## Oracle and Seagate deployment
+
+After P4 cutover Oracle owns the writable catalog. Fedora's installed CLI
+forwards status/run/retry/reindex to Oracle; the Fedora pull timer archives
+verified files on Seagate and acknowledges them before Oracle cleanup.
+Archived videos remain downloaded even when absent from Oracle staging.
+
+See [runtime and recovery](docs/oracle-archive.md) and
+[P4 acceptance evidence](docs/P4-task-state.md). Runtime data, video files and
+Telegram credentials stay outside this repository.

@@ -1,0 +1,7 @@
+[Unit]
+Description=Retry LivingGaul pull when archive mount appears
+[Path]
+PathChanged=/mnt/Seagate6TB
+Unit=livinggaul-archive-pull.service
+[Install]
+WantedBy=default.target

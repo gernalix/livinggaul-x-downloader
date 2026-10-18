@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# VERSION=0.4.2 prompt=392814 reusable LivingGaul X video downloader
+# prompt=392814 shared-video recovery and Fedora encoder fallback
 from __future__ import annotations
 
 import argparse
@@ -15,6 +15,8 @@ import sqlite3
 import subprocess
 import sys
 import time
+import signal
+import livinggaul_pipeline as pipeline
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -22,10 +24,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-VERSION = "0.4.2"
+_nv_raw = (Path(__file__).resolve().parent / "NV.txt").read_bytes()
+if not re.fullmatch(rb"[1-9][0-9]*\n", _nv_raw):
+    raise ValueError("NV.txt must contain a positive integer followed by one LF")
+VERSION = _nv_raw[:-1].decode("ascii")
 PROFILE_URL = "https://x.com/LivingGaul"
 SCREEN_NAME = "LivingGaul"
-DEFAULT_OUTPUT_DIR = Path.home() / "Videos" / "LivingGaul_X"
+DEFAULT_OUTPUT_DIR = Path(os.environ.get("LIVINGGAUL_OUTPUT", str(Path.home() / "Videos" / "LivingGaul_X")))
 DEFAULT_STATE_DIR = Path.home() / ".local" / "state" / "livinggaul-x-downloader"
 DEFAULT_DB_PATH = DEFAULT_STATE_DIR / "download_history.sqlite"
 DEFAULT_ARCHIVE = DEFAULT_STATE_DIR / "yt-dlp-download-archive.txt"
@@ -250,6 +255,7 @@ def connect_db(db_path: Path) -> sqlite3.Connection:
         "CREATE INDEX IF NOT EXISTS idx_metadata_download_captured "
         "ON metadata_snapshots(download_id, captured_at DESC)"
     )
+    pipeline.migrate(con)
     con.execute("DROP VIEW IF EXISTS video_catalog")
     con.execute(
         """
@@ -271,6 +277,7 @@ def connect_db(db_path: Path) -> sqlite3.Connection:
           d.direct_video_url,
           d.final_filename,
           d.file_path,
+          d.storage_state, d.archive_path, d.archive_ack_at,
           d.size_bytes,
           CASE WHEN d.size_bytes IS NULL THEN NULL ELSE d.size_bytes / 1000000.0 END AS size_mb,
           CASE WHEN d.size_bytes IS NULL THEN NULL ELSE d.size_bytes / 1048576.0 END AS size_mib,
@@ -346,15 +353,34 @@ def connect_db(db_path: Path) -> sqlite3.Connection:
         WHERE status='downloaded'
         """
     )
-    con.execute("PRAGMA user_version=4")
+    con.execute("PRAGMA user_version=5")
     con.commit()
     with contextlib.suppress(PermissionError):
         os.chmod(db_path, 0o600)
     return con
 
 
-def run(cmd: list[str], timeout: int = 180) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=timeout)
+def run(cmd: list[str], timeout: int = 180, *, text: bool = True) -> subprocess.CompletedProcess[str]:
+    if os.environ.get("LIVINGGAUL_MANAGED") != "1":
+        return subprocess.run(cmd, text=text, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=timeout)
+    pipeline.resource_check(DEFAULT_OUTPUT_DIR)
+    process = subprocess.Popen(cmd, text=text, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+    deadline = time.monotonic() + timeout
+    try:
+        while True:
+            try:
+                stdout, stderr = process.communicate(timeout=5)
+                return subprocess.CompletedProcess(cmd, process.returncode, stdout, stderr)
+            except subprocess.TimeoutExpired:
+                pipeline.resource_check(DEFAULT_OUTPUT_DIR)
+                if time.monotonic() >= deadline:
+                    raise subprocess.TimeoutExpired(cmd, timeout)
+    except BaseException:
+        os.killpg(process.pid, signal.SIGTERM)
+        try: process.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGKILL); process.communicate()
+        raise
 
 
 def tool_path(name: str) -> str:
@@ -533,7 +559,7 @@ def candidates_from_url_file(path: Path) -> list[Candidate]:
 
 def row_has_existing_file(row: sqlite3.Row) -> bool:
     file_path = row["file_path"]
-    return bool(file_path and Path(file_path).exists())
+    return pipeline.archived_valid(row) or bool(file_path and Path(file_path).is_file())
 
 
 def downloaded_by_media_key(con: sqlite3.Connection, media_key: str) -> sqlite3.Row | None:
@@ -782,6 +808,12 @@ def upsert_status(
                     json.dumps(source_metadata, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
                 ),
             )
+    if os.environ.get("LIVINGGAUL_MANAGED") == "1":
+        row = con.execute("SELECT * FROM downloads WHERE original_url=?", (candidate.url,)).fetchone()
+        if status == "downloaded":
+            pipeline.record_staged(con, row, source_metadata)
+        elif status == "failed":
+            con.execute("UPDATE downloads SET storage_state='failed' WHERE id=?", (row['id'],))
     con.commit()
 
 
@@ -817,10 +849,86 @@ def record_duplicate(
     )
 
 
-def ytdlp_base_args(args: argparse.Namespace) -> list[str]:
+def ytdlp_base_args(args: argparse.Namespace, *, use_cookies: bool = True) -> list[str]:
     cmd = [tool_path("yt-dlp"), "--no-playlist", "--retries", "5", "--fragment-retries", "5", "--sleep-requests", "1"]
-    cmd.extend(browser_cookie_args(args.cookies_mode, args.firefox_profile))
+    if os.environ.get("LIVINGGAUL_MANAGED") == "1":
+        cmd.extend(["--max-filesize", "512M"])
+    if use_cookies:
+        cmd.extend(browser_cookie_args(args.cookies_mode, args.firefox_profile))
     return cmd
+
+
+def fxtwitter_video_url(post: dict[str, Any]) -> str | None:
+    """Choose the best MP4 at <=480 pixels high, or the smallest larger MP4."""
+    media = post.get("media") or {}
+    if not isinstance(media, dict):
+        return None
+    for video in media.get("videos") or []:
+        if not isinstance(video, dict):
+            continue
+        choices: list[tuple[int, int, int, str]] = []
+        formats = video.get("formats") or video.get("variants") or []
+        for fmt in [*formats, video]:
+            if not isinstance(fmt, dict):
+                continue
+            url = fmt.get("url")
+            if not isinstance(url, str):
+                continue
+            parsed = urllib.parse.urlsplit(url)
+            if parsed.scheme != "https" or parsed.hostname != "video.twimg.com" or not parsed.path.lower().endswith(".mp4"):
+                continue
+            size = re.search(r"/(\d+)x(\d+)/", parsed.path)
+            height = int(size.group(2)) if size else 0
+            width = int(size.group(1)) if size else 0
+            if height and height <= 480:
+                choices.append((0, -height, -width, url))
+            elif height:
+                choices.append((1, height, width, url))
+            else:
+                choices.append((2, 0, 0, url))
+        if choices:
+            return min(choices)[3]
+    return None
+
+
+def extract_fxtwitter_metadata(candidate: Candidate, logfile: Path | None) -> dict[str, Any]:
+    """Resolve public videos embedded in a LivingGaul post, including quoted posts."""
+    url = f"https://api.fxtwitter.com/{SCREEN_NAME}/status/{candidate.tweet_id}"
+    req = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": "livinggaul-x-downloader/0.4"})
+    with urllib.request.urlopen(req, timeout=25) as response:
+        payload = json.loads(response.read(2_000_000))
+    tweet = payload.get("tweet") if isinstance(payload, dict) else None
+    if not isinstance(tweet, dict) or str(tweet.get("id")) != candidate.tweet_id:
+        raise RuntimeError("public post metadata unavailable")
+    source = tweet
+    media_url = fxtwitter_video_url(source)
+    if not media_url and isinstance(tweet.get("quote"), dict):
+        source = tweet["quote"]
+        media_url = fxtwitter_video_url(source)
+    if not media_url:
+        raise RuntimeError("no downloadable MP4 in post or quoted post")
+    author = tweet.get("author") or {}
+    log(f"metadata quoted-media fallback tweet_id={candidate.tweet_id} source=fxtwitter quoted={source is not tweet}", logfile)
+    return {
+        "id": candidate.tweet_id,
+        "webpage_url": candidate.url,
+        "title": tweet.get("text") or "Shared video",
+        "description": tweet.get("text") or "",
+        "uploader": author.get("screen_name") or SCREEN_NAME,
+        "uploader_id": author.get("id"),
+        "timestamp": tweet.get("created_timestamp"),
+        "view_count": tweet.get("views"),
+        "like_count": tweet.get("likes"),
+        "retweet_count": tweet.get("retweets"),
+        "reply_count": tweet.get("replies"),
+        "formats": [{"url": media_url, "ext": "mp4", "vcodec": "h264", "acodec": "aac"}],
+        "url": media_url,
+        "ext": "mp4",
+        "_download_url": media_url,
+        "_download_no_cookies": True,
+        "quoted_source_url": source.get("url") if source is not tweet else None,
+        "metadata_provider": "fxtwitter",
+    }
 
 
 def extract_metadata(args: argparse.Namespace, candidate: Candidate, logfile: Path | None) -> dict[str, Any]:
@@ -837,9 +945,17 @@ def extract_metadata(args: argparse.Namespace, candidate: Candidate, logfile: Pa
             last_error = f"metadata timeout: {exc}"
             continue
         if result.returncode == 0 and result.stdout.strip():
-            return json.loads(result.stdout)
-        last_error = (result.stderr or result.stdout).strip()[-1200:]
-    raise RuntimeError(last_error or "yt-dlp returned no metadata")
+            meta = json.loads(result.stdout)
+            if metadata_has_video(meta):
+                meta["_download_no_cookies"] = not bool(cookie_args)
+                return meta
+            last_error = "yt-dlp returned metadata without video formats"
+        else:
+            last_error = (result.stderr or result.stdout).strip()[-1200:]
+    try:
+        return extract_fxtwitter_metadata(candidate, logfile)
+    except (OSError, ValueError, KeyError, RuntimeError) as exc:
+        raise RuntimeError(f"{last_error or 'yt-dlp returned no metadata'}; quoted-media fallback: {exc}") from exc
 
 
 def metadata_has_video(meta: dict[str, Any]) -> bool:
@@ -1012,12 +1128,22 @@ def ensure_max_480(path: Path, logfile: Path | None) -> tuple[Path, str]:
     if height <= 480:
         return path, f"{height}p"
     ffmpeg = tool_path("ffmpeg")
+    encoders = run([ffmpeg, "-hide_banner", "-encoders"], timeout=15).stdout
+    if re.search(r"\blibx264\b", encoders):
+        video_args = ["-c:v", "libx264", "-crf", "23", "-preset", "veryfast"]
+    elif re.search(r"\blibopenh264\b", encoders):
+        video_args = ["-c:v", "libopenh264", "-b:v", "900k"]
+    elif re.search(r"\bmpeg4\b", encoders):
+        video_args = ["-c:v", "mpeg4", "-q:v", "5"]
+    else:
+        raise RuntimeError("ffmpeg has no supported MP4 video encoder")
     tmp = path.with_suffix(f".480p.tmp{path.suffix}")
     result = run(
-        [ffmpeg, "-y", "-i", str(path), "-vf", "scale=-2:480", "-c:v", "libx264", "-crf", "23", "-preset", "veryfast", "-c:a", "copy", str(tmp)],
+        [ffmpeg, "-y", "-i", str(path), "-vf", "scale=-2:480", *video_args, "-c:a", "copy", str(tmp)],
         timeout=1800,
     )
     if result.returncode != 0:
+        tmp.unlink(missing_ok=True)
         raise RuntimeError("ffmpeg downscale failed: " + result.stderr[-1200:])
     tmp.replace(path)
     log(f"downscaled file={path} from_height={height} target=480p", logfile)
@@ -1106,9 +1232,10 @@ def frame_dhash_signature(path: Path, timestamp: float) -> str | None:
     if not ffmpeg:
         return None
     try:
-        result = subprocess.run(
+        result = run(
             [
                 ffmpeg,
+                "-threads", "1",
                 "-v",
                 "error",
                 "-i",
@@ -1123,9 +1250,7 @@ def frame_dhash_signature(path: Path, timestamp: float) -> str | None:
                 "rawvideo",
                 "pipe:1",
             ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=False,
+            text=False,
             timeout=90,
         )
     except subprocess.TimeoutExpired:
@@ -1222,6 +1347,8 @@ def reindex_content(con: sqlite3.Connection, logfile: Path | None) -> tuple[int,
     updated = missing = failed = 0
     for row in rows:
         file_path = row["file_path"]
+        if pipeline.archived_valid(row):
+            continue
         if not file_path or not Path(file_path).exists():
             missing += 1
             continue
@@ -1304,7 +1431,7 @@ def download_one(args: argparse.Namespace, con: sqlite3.Connection, candidate: C
         if not metadata_has_video(meta):
             raise RuntimeError("no video formats found")
         summary.videos_found += 1
-        direct = meta.get("url")
+        direct = meta.get("url") or next((f.get("url") for f in meta.get("formats", []) if pipeline.safe_url(f.get("url"), "video.twimg.com")), None)
         media_key = metadata_media_key(meta)
         if media_key:
             duplicate = downloaded_by_media_key(con, media_key)
@@ -1332,8 +1459,9 @@ def download_one(args: argparse.Namespace, con: sqlite3.Connection, candidate: C
             return
         before = {p for p in args.output_dir.glob("*") if p.is_file()}
         outtmpl = str(args.output_dir / f"{title}.%(ext)s")
+        download_target = meta.get("_download_url") or candidate.url
         cmd = [
-            *ytdlp_base_args(args),
+            *ytdlp_base_args(args, use_cookies=not meta.get("_download_no_cookies", False)),
             "--format",
             FORMAT_480,
             "--merge-output-format",
@@ -1344,7 +1472,7 @@ def download_one(args: argparse.Namespace, con: sqlite3.Connection, candidate: C
             "--no-overwrites",
             "--output",
             outtmpl,
-            candidate.url,
+            download_target,
         ]
         log(f"download tweet_id={candidate.tweet_id}", logfile)
         result = run(cmd, timeout=3600)
@@ -1406,10 +1534,20 @@ def download_one(args: argparse.Namespace, con: sqlite3.Connection, candidate: C
             error=None,
         )
         summary.downloaded += 1
+        if os.environ.get("LIVINGGAUL_MANAGED") == "1":
+            try:
+                pipeline.drain(con)
+            except Exception:
+                log("Telegram deferred; video and outbox preserved", logfile)
         log(f"downloaded tweet_id={candidate.tweet_id} file={final}", logfile)
     except Exception as exc:
         if not args.dry_run:
             upsert_status(con, candidate, "failed", source_metadata=meta, error=str(exc))
+            if os.environ.get("LIVINGGAUL_MANAGED") == "1" and str(exc).startswith("resource guard:"):
+                pipeline.enqueue(con, "resource:" + utc_now()[:13], "LivingGaul sospeso: " + str(exc))
+                con.commit()
+                try: pipeline.drain(con)
+                except Exception: pass
         summary.failed += 1
         log(f"failed tweet_id={candidate.tweet_id} error={exc}", logfile)
 
@@ -1447,6 +1585,8 @@ def print_status(con: sqlite3.Connection, output_dir: Path, db_path: Path) -> No
     print(f"output_dir: {output_dir}")
     print(f"archive: {DEFAULT_ARCHIVE}")
     print(f"downloaded: {counts.get('downloaded', 0)}")
+    for storage in con.execute("SELECT storage_state,COUNT(*) FROM downloads WHERE status='downloaded' GROUP BY storage_state"):
+        print(f"storage_{storage[0] or 'local'}: {storage[1]}")
     print(f"skipped_duplicate: {counts.get('skipped_duplicate', 0)}")
     print(f"failed: {counts.get('failed', 0)}")
     print(f"content_fingerprint_indexed: {indexed}")
@@ -1493,6 +1633,13 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    if (args.status or args.list_failed) and args.db_path.exists():
+        con = sqlite3.connect(args.db_path.resolve().as_uri() + "?mode=ro", uri=True)
+        con.row_factory = sqlite3.Row
+        if args.status: print_status(con, args.output_dir, args.db_path)
+        else: list_failed(con)
+        con.close()
+        return 0
     mkdirs(args.output_dir, args.db_path)
     logfile = log_path()
     con = connect_db(args.db_path)
