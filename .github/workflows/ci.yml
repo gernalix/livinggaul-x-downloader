@@ -20,7 +20,7 @@ concurrency:
 
 jobs:
   smoke:
-    runs-on: ${{ ((github.event_name == 'pull_request' && github.event.pull_request.head.ref == 'task/P109-catalog') || (github.event_name == 'push' && github.ref == 'refs/heads/task/P109-catalog')) && 'p113-69-livinggaul-x' || 'ubuntu-latest' }}
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'task/wi-f4014d28c049406a8777472f0e44622f') && 'purify-local-1272741951' || (((github.event_name == 'pull_request' && github.event.pull_request.head.ref == 'task/P109-catalog') || (github.event_name == 'push' && github.ref == 'refs/heads/task/P109-catalog')) && 'p113-69-livinggaul-x' || 'ubuntu-latest') }}
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
