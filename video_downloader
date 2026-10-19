@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import uuid
@@ -46,10 +47,42 @@ def connect(arguments):
     command = ['ssh', '-t', '-F', str(Path.home() / '.ssh/config'),
                '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=15',
                'oracle-vm', script]
+    def interrupted(signum, frame):
+        raise KeyboardInterrupt
+    handlers = {sig: signal.signal(sig, interrupted) for sig in (signal.SIGHUP, signal.SIGTERM)}
+    aborted = False
     try:
         return subprocess.call(command)
     except KeyboardInterrupt:
+        aborted = True
         return 130
+    finally:
+        # Killing the interactive SSH can leave systemd-run's service alive.
+        # Use a separate control connection to stop only this invocation's unit.
+        for sig in handlers:
+            signal.signal(sig, signal.SIG_IGN)
+        stop = shlex.join(['sudo', '-n', 'systemctl', 'stop', unit]) + ' >/dev/null 2>&1'
+        absent = shlex.join(['systemctl', 'show', unit, '-p', 'LoadState', '--value'])
+        control_script = stop + ' || test "$(' + absent + ')" = not-found'
+        control = ['ssh', '-F', str(Path.home() / '.ssh/config'),
+                   '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5',
+                   'oracle-vm', control_script]
+        try:
+            result = subprocess.run(control, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL, timeout=45, check=False)
+            if result.returncode:
+                print('Chiusura remota non confermata: verifica la connessione Oracle.', file=sys.stderr)
+        except (OSError, subprocess.TimeoutExpired):
+            print('Chiusura remota non confermata: connessione Oracle non disponibile.', file=sys.stderr)
+        finally:
+            for sig, handler in handlers.items():
+                signal.signal(sig, handler)
+            if aborted and sys.stdout.isatty():
+                try:
+                    sys.stdout.write('\033[?25h\033[?1049l')
+                    sys.stdout.flush()
+                except OSError:
+                    pass  # The terminal itself may already have been closed.
 
 
 def main(argv=None):

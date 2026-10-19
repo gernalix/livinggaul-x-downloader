@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import runpy
+import signal
 import subprocess
 import sys
 import tempfile
@@ -222,6 +223,36 @@ class VideoTests(unittest.TestCase):
         self.assertIn('MemoryMax=220M', command)
         self.assertEqual(command[-2:], ['--', '-100987'])
         self.assertFalse(any('LoadCredential=' in token for token in command))
+
+    def test_interrupt_and_window_hangup_stop_only_the_owned_remote_unit(self):
+        for action in ('ctrl_c', 'window_close', 'normal_exit'):
+            with self.subTest(action=action):
+                previous = signal.getsignal(signal.SIGHUP)
+                def interactive(command):
+                    if action == 'ctrl_c':
+                        raise KeyboardInterrupt
+                    if action == 'window_close':
+                        signal.raise_signal(signal.SIGHUP)
+                    return 0
+                with patch.object(subprocess, 'call', side_effect=interactive) as call, \
+                        patch.object(subprocess, 'run', return_value=NS(returncode=0)) as control:
+                    code = LAUNCHER['connect'](['--demo'])
+                self.assertEqual(code, 0 if action == 'normal_exit' else 130)
+                self.assertEqual(signal.getsignal(signal.SIGHUP), previous)
+                script = call.call_args.args[0][-1]
+                import re
+                unit = re.search(r'--unit=(livinggaul-cli-[0-9a-f]{12})', script)[1]
+                stop_script = control.call_args.args[0][-1]
+                self.assertIn('systemctl stop ' + unit, stop_script)
+                self.assertNotIn('--demo', stop_script)
+                self.assertEqual(control.call_args.kwargs['stdin'], subprocess.DEVNULL)
+
+    def test_failed_cleanup_does_not_claim_remote_stop(self):
+        with patch.object(subprocess, 'call', side_effect=KeyboardInterrupt), \
+                patch.object(subprocess, 'run', return_value=NS(returncode=255)), \
+                contextlib.redirect_stderr(io.StringIO()) as stream:
+            self.assertEqual(LAUNCHER['connect'](['--demo']), 130)
+        self.assertIn('Chiusura remota non confermata', stream.getvalue())
 
     def test_default_launch_opens_terminal_with_chat_id_as_one_argument(self):
         fake = Mock(wait=Mock(return_value=0))

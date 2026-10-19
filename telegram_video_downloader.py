@@ -12,6 +12,7 @@ from pathlib import Path
 import re
 import runpy
 import selectors
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -480,6 +481,9 @@ def main(argv=None):
 
 
 if __name__ == '__main__':
+    def stopped(signum, frame):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, stopped)
     try:
         raise SystemExit(main())
     except KeyboardInterrupt:

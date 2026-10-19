@@ -267,5 +267,8 @@ video_downloader --demo   # dashboard con dati fittizi, senza download o SQLite 
 
 Il launcher usa unità systemd transitorie con i limiti di risorse Oracle già
 previsti e durata massima 24 ore. Il programma prende prima il lock della
-sessione Telegram e quello del catalogo per ogni singolo video. Ctrl+C interrompe;
-la chiusura del terminale interrompe anche il processo remoto.
+sessione Telegram e quello del catalogo per ogni singolo video. Ctrl+C o la
+chiusura della finestra con la X interrompono il servizio remoto di quella
+specifica esecuzione. Il launcher usa una connessione di controllo separata per
+fermarlo dopo la chiusura dell'SSH interattivo. Se Oracle non è raggiungibile,
+segnala che l'arresto remoto non è stato confermato.
