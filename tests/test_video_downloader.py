@@ -23,6 +23,13 @@ LAUNCHER = runpy.run_path(str(ROOT / 'video_downloader'))
 
 
 class VideoTests(unittest.TestCase):
+    def setUp(self):
+        self.window_tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.window_tmp.cleanup)
+        self.window_patch = patch.dict(LAUNCHER['main'].__globals__, WINDOW_STATE=Path(self.window_tmp.name))
+        self.window_patch.start()
+        self.addCleanup(self.window_patch.stop)
+
     def test_chat_id_is_argument_not_fixed_channel(self):
         for value in ('7', '987654321', '-100987654321'):
             self.assertEqual(video.chat_id(value), int(value))
@@ -250,7 +257,80 @@ class VideoTests(unittest.TestCase):
             with contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(LAUNCHER['main'](['--', '-100987']), 0)
         command = spawn.call_args.args[0]
-        self.assertEqual(command[-3:], ['--terminal-session', '--', '-100987'])
+        self.assertIn('--terminal-session', command)
+        self.assertIn('--terminal-token', command)
+        self.assertEqual(command[-2:], ['--', '-100987'])
         self.assertIn('--new-window', command)
         self.assertEqual(spawn.call_args.kwargs['env']['WAYLAND_DISPLAY'], 'wayland-fixture')
         manager.assert_called_once()
+        with contextlib.redirect_stdout(io.StringIO()) as stream, patch.object(subprocess, 'Popen') as again:
+            self.assertEqual(LAUNCHER['main'](['--', '-100987']), 0)
+            again.assert_not_called()
+        self.assertEqual(json.loads(stream.getvalue())['status'], 'already_open')
+
+
+    def test_parallel_window_requests_reserve_only_one_terminal(self):
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+            tokens = list(pool.map(lambda _: LAUNCHER['reserve_window'](), range(8)))
+        token = next(t for t in tokens if t)
+        self.assertEqual(sum(t is not None for t in tokens), 1)
+        self.assertTrue(LAUNCHER['claim_window'](token))
+        self.assertIsNone(LAUNCHER['reserve_window']())
+        LAUNCHER['release_window'](token)
+        self.assertIsNotNone(LAUNCHER['reserve_window']())
+
+
+    def test_stale_terminal_pid_does_not_block_a_new_window(self):
+        token = LAUNCHER['reserve_window']()
+        self.assertTrue(LAUNCHER['claim_window'](token))
+        with LAUNCHER['window_state']() as (state, path):
+            state['start'] = 'wrong-process-generation'
+            LAUNCHER['save_window'](path, state)
+        self.assertIsNotNone(LAUNCHER['reserve_window']())
+
+
+    def test_archive_counts_read_only_aggregates_without_video_files(self):
+        engine = runpy.run_path(str(ROOT / 'livinggaul-x-downloader'))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'catalog.sqlite'
+            con = engine['connect_db'](path)
+            for index, state in enumerate(('archived', 'archived', 'staged'), 1):
+                con.execute("INSERT INTO downloads (id,original_url,status,storage_state,archive_ack_at,created_at,updated_at) VALUES (?,?,'downloaded',?,?,?,?)",
+                            (index, 'fixture:' + str(index), state, 1 if state == 'archived' else None, '', ''))
+            con.commit(); con.close()
+            with patch.object(Path, 'open', side_effect=AssertionError('Video files must not be opened')):
+                counts = video.archive_counts(path, {1, 3})
+            self.assertEqual((counts['global_confirmed'], counts['global_waiting']), (2, 1))
+            self.assertEqual((counts['run_completed'], counts['run_confirmed'], counts['run_waiting']), (2, 1, 1))
+
+
+    def test_monitor_status_excludes_contents_and_current_item(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp)
+            dash = video.Dashboard('PRIVATE-CHANNEL', io.StringIO())
+            dash.current = 'PRIVATE-TITLE https://private.invalid/item'
+            dash.telemetry_path = state / 'progress.json'
+            dash.draw(True)
+            raw = dash.telemetry_path.read_text()
+            self.assertNotIn('PRIVATE-', raw)
+            self.assertNotIn('private.invalid', raw)
+            self.assertEqual(dash.telemetry_path.stat().st_mode & 0o777, 0o600)
+            with patch.object(video, 'STATE', state), patch.object(video, 'archive_counts', return_value={}), \
+                    patch.object(video, 'client', side_effect=AssertionError('No Telegram access')), \
+                    contextlib.redirect_stdout(io.StringIO()) as stream:
+                self.assertEqual(video.main(['--status']), 0)
+            data = json.loads(stream.getvalue())
+            self.assertNotIn('phase', data['progress'])
+            self.assertTrue(all(v is None or isinstance(v, (int, float, bool)) for v in data['progress'].values()))
+
+
+    def test_redraw_erases_each_line_and_prevents_wrapping(self):
+        dash = video.Dashboard('fixture', io.StringIO())
+        dash.ansi = True
+        dash.current = 'long title ' * 40
+        with patch.object(video.shutil, 'get_terminal_size', return_value=os.terminal_size((70, 24))):
+            dash.draw(True)
+        lines = dash.stream.getvalue().removeprefix('\033[H').removesuffix('\033[J').splitlines()
+        self.assertTrue(all(line.endswith('\033[K') for line in lines))
+        self.assertTrue(all(len(line.removesuffix('\033[K')) <= 69 for line in lines))

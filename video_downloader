@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Apri il terminale con la dashboard del downloader Telegram su Oracle."""
 import argparse
+import contextlib
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -10,9 +12,76 @@ import shutil
 import signal
 import subprocess
 import sys
+import time
 import uuid
 
 ROOT = Path(__file__).resolve().parent
+WINDOW_STATE = Path.home() / '.local/state/video_downloader/terminal'
+
+
+def process_identity(pid):
+    try:
+        value = Path(f'/proc/{int(pid)}/stat').read_text()
+        fields = value[value.rfind(')') + 2:].split()
+        return fields[19] if fields[0] != 'Z' else None
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+@contextlib.contextmanager
+def window_state():
+    WINDOW_STATE.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with (WINDOW_STATE / 'guard').open('a') as guard:
+        fcntl.flock(guard, fcntl.LOCK_EX)
+        path = WINDOW_STATE / 'owner.json'
+        try:
+            state = json.loads(path.read_text())
+        except (OSError, ValueError):
+            state = {}
+        if not isinstance(state, dict):
+            state = {}
+        yield state, path
+
+
+def window_alive(state):
+    boot = Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+    if state.get('boot') != boot:
+        return False
+    if state.get('pid'):
+        return process_identity(state['pid']) == state.get('start') and state.get('start') is not None
+    return 0 <= time.monotonic() - state.get('pending', -60) < 30
+
+
+def save_window(path, state):
+    temporary = path.with_suffix('.new')
+    temporary.write_text(json.dumps(state))
+    temporary.chmod(0o600)
+    temporary.replace(path)
+
+
+def reserve_window():
+    with window_state() as (state, path):
+        if window_alive(state):
+            return None
+        token = uuid.uuid4().hex
+        save_window(path, {'token': token, 'pending': time.monotonic(),
+                          'boot': Path('/proc/sys/kernel/random/boot_id').read_text().strip()})
+        return token
+
+
+def claim_window(token):
+    with window_state() as (state, path):
+        if token != state.get('token') or state.get('pid'):
+            return False
+        state.update(pid=os.getpid(), start=process_identity(os.getpid()))
+        save_window(path, state)
+        return True
+
+
+def release_window(token):
+    with window_state() as (state, path):
+        if state.get('token') == token:
+            path.unlink(missing_ok=True)
 
 
 def valid_chat_id(value):
@@ -22,6 +91,7 @@ def valid_chat_id(value):
 
 
 def remote_command(arguments):
+    size = shutil.get_terminal_size()
     return ['sudo', '-n', 'systemd-run', '--wait', '--pipe', '--collect',
             '--unit=livinggaul-cli-' + uuid.uuid4().hex[:12],
             '-p', 'User=livinggaul', '-p', 'Environment=HOME=/home/livinggaul',
@@ -29,6 +99,7 @@ def remote_command(arguments):
             '-p', 'Environment=LIVINGGAUL_MANAGED=1',
             '-p', 'Environment=LIVINGGAUL_OUTPUT=/home/livinggaul/staging',
             '-p', 'Environment=VIDEO_DOWNLOADER_DASH=1',
+            '-p', f'Environment=COLUMNS={size.columns}',
             '-p', 'Environment=LIVINGGAUL_ENGINE_ROOT=/srv/livinggaul/current',
             '-p', 'UMask=0077', '-p', 'CPUQuota=35%', '-p', 'MemoryMax=220M',
             '-p', 'MemorySwapMax=64M', '-p', 'TasksMax=24', '-p', 'Nice=15',
@@ -91,48 +162,74 @@ def main(argv=None):
     parser.add_argument('--login', action='store_true', help='autorizza la sessione Oracle con QR')
     parser.add_argument('--check', action='store_true', help='controllo senza rete Telegram')
     parser.add_argument('--demo', action='store_true', help='dashboard fittizia, nessun download')
+    parser.add_argument('--status', action='store_true', help='contatori numerici privati, senza aprire terminali o video')
     parser.add_argument('--foreground', action='store_true', help='usa il terminale corrente')
     parser.add_argument('--window', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('--terminal-session', action='store_true', help=argparse.SUPPRESS)
+    parser.add_argument('--terminal-token', help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
-    actions = [name for name in ('login', 'check', 'demo') if getattr(args, name)]
+    actions = [name for name in ('login', 'check', 'demo', 'status') if getattr(args, name)]
     if len(actions) > 1 or (actions and args.chat_id is not None):
-        parser.error('Scegli un chat_id oppure una sola opzione tra --login, --check, --demo')
+        parser.error('Scegli un chat_id oppure una sola opzione tra --login, --check, --demo, --status')
     if not actions and args.chat_id is None:
         parser.error('Inserisci il chat_id del canale Telegram')
     remote_args = ['--' + actions[0]] if actions else ['--', args.chat_id]
-    if args.foreground or args.terminal_session or args.check:
-        code = connect(remote_args)
+    if args.foreground or args.terminal_session or args.check or args.status:
+        token = args.terminal_token
         if args.terminal_session:
-            print(f'\nComando terminato (codice {code}).', flush=True)
-            try:
-                input('Premi Invio per chiudere questo terminale…')
-            except (EOFError, KeyboardInterrupt):
-                pass
-        return code
+            token = token or reserve_window()
+            if not token or not claim_window(token):
+                print('Il terminale Video Telegram è già aperto.')
+                return 0
+        try:
+            code = connect(remote_args)
+            if args.terminal_session:
+                print(f'\nComando terminato (codice {code}).', flush=True)
+                try:
+                    input('Premi Invio per chiudere questo terminale…')
+                except (EOFError, KeyboardInterrupt):
+                    pass
+            return code
+        finally:
+            if args.terminal_session:
+                release_window(token)
+    token = reserve_window()
+    if not token:
+        print(json.dumps({'status': 'already_open', 'message': 'Il terminale Video Telegram è già aperto.'}))
+        return 0
     terminal = shutil.which('ptyxis')
     if not terminal:
+        release_window(token)
         parser.error('Terminale Ptyxis non disponibile. Usa --foreground nel tuo terminale.')
     own_args = ['--' + actions[0]] if actions else ['--', args.chat_id]
-    invocation = [sys.executable, str(Path(__file__).resolve()), '--terminal-session', *own_args]
+    invocation = [sys.executable, str(Path(__file__).resolve()), '--terminal-session', '--terminal-token', token, *own_args]
     environment = dict(os.environ)
     if not environment.get('DISPLAY') and not environment.get('WAYLAND_DISPLAY'):
         # Il runner della mini-app inoltra solo l'ambiente minimo. Recupera dal
         # manager utente esclusivamente le variabili del display già attivo.
-        manager = subprocess.run(['systemctl', '--user', 'show-environment'],
-                                 capture_output=True, text=True, timeout=5, check=True)
+        try:
+            manager = subprocess.run(['systemctl', '--user', 'show-environment'],
+                                     capture_output=True, text=True, timeout=5, check=True)
+        except BaseException:
+            release_window(token)
+            raise
         for line in manager.stdout.splitlines():
             key, sep, value = line.partition('=')
             if sep and key in {'DISPLAY', 'WAYLAND_DISPLAY', 'XAUTHORITY', 'XDG_SESSION_TYPE'}:
                 environment[key] = value
-    process = subprocess.Popen([terminal, '--new-window', '--title=Video Telegram — Oracle', '--', *invocation],
-                               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                               stderr=subprocess.DEVNULL, start_new_session=True, env=environment)
+    try:
+        process = subprocess.Popen([terminal, '--new-window', '--title=Video Telegram — Oracle', '--', *invocation],
+                                   stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.DEVNULL, start_new_session=True, env=environment)
+    except BaseException:
+        release_window(token)
+        raise
     try:
         code = process.wait(timeout=1.5)
     except subprocess.TimeoutExpired:
         code = 0  # Il primo processo Ptyxis può restare il server della finestra.
     if code:
+        release_window(token)
         print('Impossibile aprire il terminale. Usa video_downloader --foreground CHAT_ID.', file=sys.stderr)
         return code
     print(json.dumps({'status': 'terminal_requested', 'host': 'oracle-vm',
