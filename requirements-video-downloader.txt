@@ -1,0 +1,3 @@
+# Additional dependencies in the existing isolated Oracle runtime.
+Telethon==1.45.0
+qrcode==8.2

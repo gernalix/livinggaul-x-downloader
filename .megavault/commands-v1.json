@@ -1,1 +1,64 @@
-{"contract_version":"megavault.command/v1","project_id":69,"owner":"livinggaul-x-downloader","commands":[{"key":"discovered_livinggaul_x_downloader","host_scope":"H0001","entrypoint":"python3","argv":["livinggaul-x-downloader"],"input_schema":{"type":"object","properties":{},"required":[],"additionalProperties":false},"working_directory":".","prerequisites":["Owner browser session and output storage available"],"timeout_seconds":3600,"idempotency":"non_idempotent","risk":"high","state":"disabled","description":"Run the owner downloader; disabled pending browser, privacy, and storage review."}]}
+{
+  "contract_version": "megavault.command/v1",
+  "project_id": 69,
+  "owner": "livinggaul-x-downloader",
+  "commands": [
+    {
+      "key": "discovered_livinggaul_x_downloader",
+      "host_scope": "H0001",
+      "entrypoint": "python3",
+      "argv": [
+        "livinggaul-x-downloader"
+      ],
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "working_directory": ".",
+      "prerequisites": [
+        "Owner browser session and output storage available"
+      ],
+      "timeout_seconds": 3600,
+      "idempotency": "non_idempotent",
+      "risk": "high",
+      "state": "disabled",
+      "description": "Run the owner downloader; disabled pending browser, privacy, and storage review."
+    },
+    {
+      "key": "telegram_video_downloader",
+      "display_title": "Scarica video da Telegram",
+      "host_scope": "H0001",
+      "entrypoint": "video_downloader",
+      "argv": [
+        "--window",
+        "--",
+        "{chat_id}"
+      ],
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "chat_id": {
+            "type": "string",
+            "pattern": "^-?[1-9][0-9]{0,15}$",
+            "description": "ID numerico del canale Telegram"
+          }
+        },
+        "required": [
+          "chat_id"
+        ],
+        "additionalProperties": false
+      },
+      "working_directory": ".",
+      "prerequisites": [
+        "Desktop Fedora disponibile; sessione Telegram Oracle autorizzata"
+      ],
+      "timeout_seconds": 30,
+      "idempotency": "idempotent",
+      "risk": "medium",
+      "state": "enabled",
+      "description": "Apre un terminale Fedora con dashboard del downloader su Oracle; legge il canale indicato e riusa il catalogo SQLite esistente."
+    }
+  ]
+}

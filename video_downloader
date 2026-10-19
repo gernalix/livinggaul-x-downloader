@@ -1,0 +1,111 @@
+#!/usr/bin/env python3
+"""Apri il terminale con la dashboard del downloader Telegram su Oracle."""
+import argparse
+import json
+import os
+from pathlib import Path
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import uuid
+
+ROOT = Path(__file__).resolve().parent
+
+
+def valid_chat_id(value):
+    if not re.fullmatch(r'-?[1-9][0-9]{0,15}', str(value)):
+        raise argparse.ArgumentTypeError('Inserisci un chat_id numerico diverso da zero.')
+    return str(value)
+
+
+def remote_command(arguments):
+    return ['sudo', '-n', 'systemd-run', '--wait', '--pipe', '--collect',
+            '--unit=livinggaul-cli-' + uuid.uuid4().hex[:12],
+            '-p', 'User=livinggaul', '-p', 'Environment=HOME=/home/livinggaul',
+            '-p', 'Environment=PATH=/srv/livinggaul/venv/bin:/usr/bin:/bin',
+            '-p', 'Environment=LIVINGGAUL_MANAGED=1',
+            '-p', 'Environment=LIVINGGAUL_OUTPUT=/home/livinggaul/staging',
+            '-p', 'Environment=VIDEO_DOWNLOADER_DASH=1',
+            '-p', 'Environment=LIVINGGAUL_ENGINE_ROOT=/srv/livinggaul/repo',
+            '-p', 'UMask=0077', '-p', 'CPUQuota=35%', '-p', 'MemoryMax=220M',
+            '-p', 'MemorySwapMax=64M', '-p', 'TasksMax=24', '-p', 'Nice=15',
+            '-p', 'NoNewPrivileges=true', '-p', 'ProtectSystem=strict',
+            '-p', 'ProtectHome=read-only', '-p', 'ReadWritePaths=/home/livinggaul',
+            '-p', 'PrivateTmp=true', '-p', 'TimeoutStartSec=24h', '-p', 'TimeoutStopSec=30s',
+            '/srv/livinggaul/venv/bin/python', '/srv/livinggaul/video-downloader/telegram_video_downloader.py', *arguments]
+
+
+def connect(arguments):
+    # --pipe inoltra stdin anche per la password 2FA; QR e password restano nel terminale.
+    remote = remote_command(arguments)
+    unit = next(value.split('=', 1)[1] for value in remote if value.startswith('--unit='))
+    cleanup = shlex.join(['sudo', '-n', 'systemctl', 'stop', unit]) + ' >/dev/null 2>&1'
+    script = 'trap ' + shlex.quote(cleanup) + ' EXIT; trap "exit 130" HUP INT TERM; ' + shlex.join(remote)
+    command = ['ssh', '-t', '-F', str(Path.home() / '.ssh/config'),
+               '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=15',
+               'oracle-vm', script]
+    try:
+        return subprocess.call(command)
+    except KeyboardInterrupt:
+        return 130
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('chat_id', type=valid_chat_id, nargs='?')
+    parser.add_argument('--login', action='store_true', help='autorizza la sessione Oracle con QR')
+    parser.add_argument('--check', action='store_true', help='controllo senza rete Telegram')
+    parser.add_argument('--demo', action='store_true', help='dashboard fittizia, nessun download')
+    parser.add_argument('--foreground', action='store_true', help='usa il terminale corrente')
+    parser.add_argument('--window', action='store_true', help=argparse.SUPPRESS)
+    parser.add_argument('--terminal-session', action='store_true', help=argparse.SUPPRESS)
+    args = parser.parse_args(argv)
+    actions = [name for name in ('login', 'check', 'demo') if getattr(args, name)]
+    if len(actions) > 1 or (actions and args.chat_id is not None):
+        parser.error('Scegli un chat_id oppure una sola opzione tra --login, --check, --demo')
+    if not actions and args.chat_id is None:
+        parser.error('Inserisci il chat_id del canale Telegram')
+    remote_args = ['--' + actions[0]] if actions else ['--', args.chat_id]
+    if args.foreground or args.terminal_session or args.check:
+        code = connect(remote_args)
+        if args.terminal_session:
+            print(f'\nComando terminato (codice {code}).', flush=True)
+            try:
+                input('Premi Invio per chiudere questo terminale…')
+            except (EOFError, KeyboardInterrupt):
+                pass
+        return code
+    terminal = shutil.which('ptyxis')
+    if not terminal:
+        parser.error('Terminale Ptyxis non disponibile. Usa --foreground nel tuo terminale.')
+    own_args = ['--' + actions[0]] if actions else ['--', args.chat_id]
+    invocation = [sys.executable, str(Path(__file__).resolve()), '--terminal-session', *own_args]
+    environment = dict(os.environ)
+    if not environment.get('DISPLAY') and not environment.get('WAYLAND_DISPLAY'):
+        # Il runner della mini-app inoltra solo l'ambiente minimo. Recupera dal
+        # manager utente esclusivamente le variabili del display già attivo.
+        manager = subprocess.run(['systemctl', '--user', 'show-environment'],
+                                 capture_output=True, text=True, timeout=5, check=True)
+        for line in manager.stdout.splitlines():
+            key, sep, value = line.partition('=')
+            if sep and key in {'DISPLAY', 'WAYLAND_DISPLAY', 'XAUTHORITY', 'XDG_SESSION_TYPE'}:
+                environment[key] = value
+    process = subprocess.Popen([terminal, '--new-window', '--title=Video Telegram — Oracle', '--', *invocation],
+                               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, start_new_session=True, env=environment)
+    try:
+        code = process.wait(timeout=1.5)
+    except subprocess.TimeoutExpired:
+        code = 0  # Il primo processo Ptyxis può restare il server della finestra.
+    if code:
+        print('Impossibile aprire il terminale. Usa video_downloader --foreground CHAT_ID.', file=sys.stderr)
+        return code
+    print(json.dumps({'status': 'terminal_requested', 'host': 'oracle-vm',
+                      'action': actions[0] if actions else 'download', 'chat_id': args.chat_id}))
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())
