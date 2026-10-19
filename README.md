@@ -186,3 +186,64 @@ Archived videos remain downloaded even when absent from Oracle staging.
 See [runtime and recovery](docs/oracle-archive.md) and
 [P4 acceptance evidence](docs/P4-task-state.md). Runtime data, video files and
 Telegram credentials stay outside this repository.
+
+## Download dei video linkati su Telegram
+
+```bash
+video_downloader CHAT_ID
+video_downloader -- CHAT_ID  # usa questa forma anche per ID negativi
+video_downloader --foreground CHAT_ID  # resta nel terminale corrente
+```
+
+`CHAT_ID` è un segnaposto: inserire l'ID numerico reale, positivo per un canale
+oppure completo con prefisso `-100`. Il comando apre automaticamente un terminale
+Fedora con la dashboard. Lettura Telegram, download e aggiornamento del catalogo
+avvengono interamente su Oracle: Fedora deve restare disponibile solo per vedere
+la finestra. La sessione e il lavoro remoto sono legati al comando avviato; non
+è un nuovo servizio periodico né un job persistente dopo la chiusura.
+
+Nella mini-app Comandi, **Scarica video da Telegram** mostra solo il campo
+`chat_id`: **OK** apre lo stesso terminale. Occorrono la sessione grafica Fedora
+attiva e l'accesso SSH `oracle-vm`; dal telefono la finestra compare su Fedora.
+La ricevuta della mini-app conferma la richiesta di apertura del terminale:
+l'esito dei download rimane nella dashboard e nel catalogo.
+
+La dashboard mostra messaggi letti, link unici, video confermati finora,
+scaricati, duplicati, errori/non video, titolo/link corrente e percentuale del
+trasferimento in corso. Il progresso globale è la percentuale dei **link
+elaborati**, non una stima dei byte complessivi ancora da scoprire. La percentuale
+del download usa la dimensione fornita o stimata da yt-dlp; se manca resta ignota.
+
+Riusa `/srv/livinggaul/repo/livinggaul-x-downloader`, il lock
+`/home/livinggaul/runtime.lock`, lo staging e il catalogo principale
+`/home/livinggaul/.local/state/livinggaul-x-downloader/download_history.sqlite`.
+Gli altri siti supportati da yt-dlp usano lo stesso percorso di metadati,
+ffprobe, hash e deduplicazione dei link X; hanno `tweet_id` NULL. Lo snapshot
+JSON include `telegram_chat_id`. Non esegue la scoperta della timeline LivingGaul
+e non invia notifiche: mantiene lo staging per la pipeline Oracle/Seagate.
+Per riprendere, rilanciare lo stesso canale; gli errori vengono ritentati.
+
+La cronologia è quella ancora accessibile all'account. Include link HTTP/HTTPS
+nel testo, nelle didascalie, nei link nascosti e nei pulsanti URL; gli allegati
+Telegram senza link non sono inclusi. Siti privati, non supportati o link senza
+video possono fallire. Non usa cookie browser su Oracle.
+
+Prima installazione: aggiungere `requirements-video-downloader.txt` al runtime
+Python Oracle esistente. Il modulo viene installato separatamente in
+`/srv/livinggaul/video-downloader/telegram_video_downloader.py` e il launcher in
+`~/.local/libexec/video_downloader/video_downloader`, collegato in `~/.local/bin`.
+Configurazione API privata: `/home/livinggaul/.config/video_downloader/telegram.json`
+con `api_id` e `api_hash`; sessione dedicata in
+`/home/livinggaul/.local/state/video_downloader/telegram.session` (permessi privati).
+Non copiare sessioni account o salvare segreti nel repository.
+
+```bash
+video_downloader --login  # QR nel terminale, eventuale 2FA inserita solo lì
+video_downloader --check  # presenza configurazione/sessione, senza rete Telegram
+video_downloader --demo   # dashboard con dati fittizi, senza download o SQLite reale
+```
+
+Il launcher usa unità systemd transitorie con i limiti di risorse Oracle già
+previsti e durata massima 24 ore. Il programma prende prima il lock della
+sessione Telegram e poi quello del catalogo per i download. Ctrl+C interrompe;
+la chiusura del terminale interrompe anche il processo remoto.
