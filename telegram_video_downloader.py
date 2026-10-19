@@ -15,6 +15,7 @@ import selectors
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 from urllib.parse import urlsplit
 
@@ -67,6 +68,35 @@ class Dashboard:
         self.last = 0
         self.started = time.monotonic()
         self.ansi = self.stream.isatty() or os.environ.get('VIDEO_DOWNLOADER_DASH') == '1'
+        self._draw_lock = threading.RLock()
+
+    @contextlib.contextmanager
+    def live(self, interval=1):
+        """Use one terminal screen; refresh even while synchronous work waits."""
+        stopped = threading.Event()
+        def refresh():
+            while not stopped.wait(interval):
+                self.draw()
+        worker = threading.Thread(target=refresh, name='dashboard-refresh', daemon=True)
+        if self.ansi:
+            self.stream.write('\033[?1049h\033[?25l\033[2J\033[H')
+            self.stream.flush()
+        worker.start()
+        try:
+            yield worker
+        finally:
+            stopped.set()
+            worker.join(timeout=2)
+            with self._draw_lock:
+                if self.ansi:
+                    self.stream.write('\033[?25h\033[?1049l')
+                    self.stream.flush()
+                # Keep the final counters visible after leaving the alternate screen.
+                ansi, self.ansi = self.ansi, False
+                try:
+                    self.draw(True)
+                finally:
+                    self.ansi = ansi
 
     def progress(self, value):
         self.bytes = value.get('downloaded_bytes') or 0
@@ -75,6 +105,10 @@ class Dashboard:
         self.draw()
 
     def draw(self, force=False):
+        with self._draw_lock:
+            self._draw(force)
+
+    def _draw(self, force=False):
         now = time.monotonic()
         if not force and now - self.last < 0.2:
             return
@@ -90,8 +124,9 @@ class Dashboard:
                  f'In elaborazione: {clean(self.current)}',
                  f'Download corrente: {current_progress} · {self.bytes / 1048576:.1f} MiB',
                  'Ctrl+C interrompe; rilancia lo stesso chat_id per riprendere.']
-        prefix = '\033[2J\033[H' if self.ansi else '\n'
-        self.stream.write(prefix + '\n'.join(lines) + '\n')
+        prefix = '\033[H' if self.ansi else '\n'
+        suffix = '\033[J' if self.ansi else ''
+        self.stream.write(prefix + '\n'.join(lines) + '\n' + suffix)
         self.stream.flush()
 
 
@@ -380,8 +415,9 @@ def fixture_demo():
     dash.messages, dash.links, dash.total = 250, 10, 10
     dash.phase, dash.current = 'Dimostrazione locale della dashboard', 'Video di esempio'
     dash.found, dash.downloaded, dash.skipped, dash.failed, dash.processed = 7, 4, 2, 1, 7
-    dash.progress({'downloaded_bytes': 40 * 1048576, 'total_bytes': 100 * 1048576})
-    dash.draw(True)
+    with dash.live():
+        dash.progress({'downloaded_bytes': 40 * 1048576, 'total_bytes': 100 * 1048576})
+        time.sleep(3)
     return 0
 
 
@@ -419,13 +455,14 @@ def main(argv=None):
             return asyncio.run(login())
         dash = Dashboard(args.chat_id)
         dash.phase = 'Caricamento del client Telegram su Oracle'
-        dash.draw(True)
-        links = asyncio.run(collect_links(args.chat_id, dash))
-        dash.phase = 'Attesa del lock del catalogo Oracle'
-        dash.draw(True)
-        with (Path.home() / 'runtime.lock').open('a') as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
-            return download(links, args.chat_id, dash)
+        with dash.live():
+            dash.draw(True)
+            links = asyncio.run(collect_links(args.chat_id, dash))
+            dash.phase = 'Attesa del lock del catalogo Oracle'
+            dash.draw(True)
+            with (Path.home() / 'runtime.lock').open('a') as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                return download(links, args.chat_id, dash)
 
 
 if __name__ == '__main__':

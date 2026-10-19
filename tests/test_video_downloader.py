@@ -10,6 +10,7 @@ import runpy
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock, Mock, patch
@@ -61,6 +62,33 @@ class VideoTests(unittest.TestCase):
         self.assertEqual(len(links), 2)
         self.assertEqual(dash.messages, 3)
         telegram.disconnect.assert_awaited_once()
+
+    def test_dashboard_uses_one_screen_and_restores_terminal_on_error(self):
+        stream = io.StringIO()
+        dash = video.Dashboard('fixture', stream)
+        dash.ansi = True
+        with self.assertRaisesRegex(RuntimeError, 'fixture'):
+            with dash.live() as worker:
+                dash.draw(True)
+                dash.phase = 'Fixture successiva'
+                dash.draw(True)
+                raise RuntimeError('fixture')
+        output = stream.getvalue()
+        self.assertEqual(output.count('\033[?1049h'), 1)
+        self.assertEqual(output.count('\033[?1049l'), 1)
+        self.assertEqual(output.count('\033[2J'), 1)
+        self.assertIn('\033[?25h', output)
+        self.assertIn('Fixture successiva', output.split('\033[?1049l')[1])
+        self.assertFalse(worker.is_alive())
+
+    def test_dashboard_refreshes_during_synchronous_work(self):
+        dash = video.Dashboard('fixture', io.StringIO())
+        refreshed = threading.Event()
+        with patch.object(dash, 'draw', side_effect=lambda *a: refreshed.set()):
+            with dash.live(interval=0.01) as worker:
+                # No asyncio loop or download progress callback is running.
+                self.assertTrue(refreshed.wait(timeout=1))
+        self.assertFalse(worker.is_alive())
 
     def test_connection_timeout_cancels_and_disconnects(self):
         cancelled = []

@@ -213,6 +213,10 @@ scaricati, duplicati, errori/non video, titolo/link corrente e percentuale del
 trasferimento in corso. Il progresso globale è la percentuale dei **link
 elaborati**, non una stima dei byte complessivi ancora da scoprire. La percentuale
 del download usa la dimensione fornita o stimata da yt-dlp; se manca resta ignota.
+Il terminale usa una sola schermata alternativa, senza accumulare vecchie
+istantanee nella cronologia. Si aggiorna anche durante il caricamento del client,
+la ricerca dei metadati e le attese del trasferimento. Alla chiusura ripristina
+il terminale e lascia visibili gli ultimi contatori.
 Connessione, verifica della sessione, ricerca del canale e lettura della cronologia
 mostrano fasi distinte. Durante le attese Telegram il terminale si aggiorna ogni
 secondo; ogni operazione ha un limite di 60 secondi e produce un errore senza
@@ -222,6 +226,9 @@ e si ferma appena lo trova.
 Riusa `/srv/livinggaul/repo/livinggaul-x-downloader`, il lock
 `/home/livinggaul/runtime.lock`, lo staging e il catalogo principale
 `/home/livinggaul/.local/state/livinggaul-x-downloader/download_history.sqlite`.
+I file vengono scaricati nello staging Oracle `/home/livinggaul/staging`,
+non nella cartella Download di Fedora; il processo di archivio esistente gestisce
+il successivo trasferimento a Seagate.
 Gli altri siti supportati da yt-dlp usano lo stesso percorso di metadati,
 ffprobe, hash e deduplicazione dei link X; hanno `tweet_id` NULL. Lo snapshot
 JSON include `telegram_chat_id`. Non esegue la scoperta della timeline LivingGaul
