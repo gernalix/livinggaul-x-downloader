@@ -4,6 +4,7 @@ Mutable data lives outside Git. Catalog publication and archive ACK share a shor
 An archive ACK is a durable assertion from the hash-verifying Fedora puller.
 """
 from __future__ import annotations
+from catalog_access import file_lock
 import argparse
 import contextlib
 import fcntl
@@ -181,7 +182,6 @@ def resource_check(path, min_free=4*1024**3, min_mem=100*1024**2):
 
 
 def snapshot(con, destination):
-    from catalog_access import file_lock
     with file_lock(Path(destination).with_suffix('.lock')):
         return _snapshot(con, destination)
 

@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
 """Compatibility CLI for the X input of the shared video archive."""
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 from video_engine import *  # Existing catalog consumers keep their API.
 from x_input import main, parse_args, discover_from_public_web, discover_from_gallery_dl, candidates_from_url_file
 

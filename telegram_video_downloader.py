@@ -23,7 +23,7 @@ import threading
 import time
 from urllib.parse import urlsplit
 
-ROOT = Path(os.environ.get('LIVINGGAUL_ENGINE_ROOT', str(Path(__file__).resolve().parent)))
+ROOT = Path(os.environ.get('LIVINGGAUL_ENGINE_ROOT', str(Path(__file__).resolve().parent))).resolve()
 sys.path.insert(0, str(ROOT))
 STATE = Path.home() / '.local/state/video_downloader'
 CONFIG = Path.home() / '.config/video_downloader/telegram.json'
