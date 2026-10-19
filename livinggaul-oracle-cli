@@ -8,10 +8,18 @@ import uuid
 
 parser=argparse.ArgumentParser(description=__doc__)
 actions=parser.add_mutually_exclusive_group(required=True)
-for name in ('run','dry-run','status','list-failed','retry-failed','reindex-content','check-source-availability'):
+for name in ('run','dry-run','status','list-failed','retry-failed','reindex-content','check-source-availability','start-download-service'):
     actions.add_argument('--'+name,action='store_true')
 args=parser.parse_args()
 action=next('--'+name.replace('_','-') for name,value in vars(args).items() if value)
+# This fixed owner action starts the managed unit without exposing a generic
+# privileged-command interface or tying its lifetime to the Mini App request.
+if action == '--start-download-service':
+    raise SystemExit(subprocess.call([
+        'ssh', '-F', str(Path.home()/'.ssh/config'), '-o', 'BatchMode=yes',
+        '-o', 'ConnectTimeout=15', 'oracle-vm',
+        'sudo -n systemctl --no-block start livinggaul-download.service',
+    ]))
 command=['sudo','-n','systemd-run','--wait','--pipe','--collect','--unit=livinggaul-cli-'+uuid.uuid4().hex[:12],
     '-p','User=livinggaul','-p','Environment=HOME=/home/livinggaul',
     '-p','Environment=PATH=/srv/livinggaul/venv/bin:/usr/bin:/bin',

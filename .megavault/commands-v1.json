@@ -6,21 +6,9 @@
     {
       "key": "discovered_livinggaul_x_downloader",
       "host_scope": "H0001",
-      "entrypoint": "/usr/bin/ssh",
+      "entrypoint": "/home/daniele/.local/bin/livinggaul-x-downloader",
       "argv": [
-        "-F",
-        "/home/daniele/.ssh/config",
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "ConnectTimeout=15",
-        "oracle-vm",
-        "sudo",
-        "-n",
-        "systemctl",
-        "--no-block",
-        "start",
-        "livinggaul-download.service"
+        "--start-download-service"
       ],
       "input_schema": {
         "type": "object",
