@@ -118,11 +118,12 @@ class Dashboard:
         lines = [f'VIDEO DOWNLOADER — Telegram {self.channel}',
                  f'Fase: {self.phase} · trascorsi {int(now - self.started)} s',
                  f'Messaggi letti: {self.messages} · link unici: {self.links}',
-                 f'Video confermati finora: {self.found} · scaricati: {self.downloaded}',
+                 f'Video confermati finora: {self.found} · scaricati su Oracle: {self.downloaded}',
                  f'Già presenti/duplicati: {self.skipped} · errori/non video: {self.failed}',
                  f'Progresso globale sui link: {self.processed}/{self.total or "?"} ({global_progress})',
                  f'In elaborazione: {clean(self.current)}',
                  f'Download corrente: {current_progress} · {self.bytes / 1048576:.1f} MiB',
+                 'Archivio Fedora: trasferimento automatico del servizio esistente.',
                  'Ctrl+C interrompe; rilancia lo stesso chat_id per riprendere.']
         prefix = '\033[H' if self.ansi else '\n'
         suffix = '\033[J' if self.ansi else ''
@@ -326,7 +327,22 @@ def overrides(target, **values):
                 setattr(target, key, value)
 
 
-def download(links, channel, dash, engine=None):
+@contextlib.contextmanager
+def catalog_lock(path, dash):
+    if path is None:
+        yield
+        return
+    dash.phase = 'Attesa del catalogo Oracle / trasferimento Fedora'
+    dash.draw(True)
+    with path.open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
+def download(links, channel, dash, engine=None, runtime_lock=None):
     engine = engine or runpy.run_path(str(ROOT / 'livinggaul-x-downloader'))
     globals_ = engine['download_one'].__globals__
     original_extract = globals_['extract_metadata']
@@ -376,30 +392,32 @@ def download(links, channel, dash, engine=None):
     # Patch solo nel processo worker, mai il servizio o il sorgente condiviso.
     with overrides(globals_, **replacements), overrides(pipeline, record_staged=staged,
             drain=lambda *a, **k: None, enqueue=lambda *a, **k: None):
-        con = engine['connect_db'](db)
+        with catalog_lock(runtime_lock, dash):
+            con = engine['connect_db'](db)
         try:
             for candidate in items:
-                dash.current = candidate.url
-                dash.phase = 'Verifica catalogo / metadati'
-                dash.percent, dash.bytes = None, 0
-                dash.draw(True)
-                before = summary.skipped_duplicate
-                duplicate = con.execute(
-                    "SELECT canonical.* FROM downloads AS link JOIN downloads AS canonical "
-                    "ON canonical.id=link.duplicate_of_id WHERE link.original_url=? "
-                    "AND link.status='skipped_duplicate' AND canonical.status='downloaded'",
-                    (candidate.url,),
-                ).fetchone()
-                if duplicate and engine['row_has_existing_file'](duplicate):
-                    summary.posts_analyzed += 1
-                    summary.skipped_duplicate += 1
-                    dash.found += 1
-                else:
-                    engine['download_one'](options, con, candidate, engine['log_path'](), summary)
-                if summary.skipped_duplicate > before:
-                    row = con.execute("SELECT status FROM downloads WHERE original_url=?", (candidate.url,)).fetchone()
-                    if row and row['status'] == 'downloaded':
+                with catalog_lock(runtime_lock, dash), con:
+                    dash.current = candidate.url
+                    dash.phase = 'Verifica catalogo / metadati'
+                    dash.percent, dash.bytes = None, 0
+                    dash.draw(True)
+                    before = summary.skipped_duplicate
+                    duplicate = con.execute(
+                        "SELECT canonical.* FROM downloads AS link JOIN downloads AS canonical "
+                        "ON canonical.id=link.duplicate_of_id WHERE link.original_url=? "
+                        "AND link.status='skipped_duplicate' AND canonical.status='downloaded'",
+                        (candidate.url,),
+                    ).fetchone()
+                    if duplicate and engine['row_has_existing_file'](duplicate):
+                        summary.posts_analyzed += 1
+                        summary.skipped_duplicate += 1
                         dash.found += 1
+                    else:
+                        engine['download_one'](options, con, candidate, engine['log_path'](), summary)
+                    if summary.skipped_duplicate > before:
+                        row = con.execute("SELECT status FROM downloads WHERE original_url=?", (candidate.url,)).fetchone()
+                        if row and row['status'] == 'downloaded':
+                            dash.found += 1
                 dash.processed += 1
                 dash.downloaded, dash.skipped, dash.failed = summary.downloaded, summary.skipped_duplicate, summary.failed
                 dash.draw(True)
@@ -458,11 +476,7 @@ def main(argv=None):
         with dash.live():
             dash.draw(True)
             links = asyncio.run(collect_links(args.chat_id, dash))
-            dash.phase = 'Attesa del lock del catalogo Oracle'
-            dash.draw(True)
-            with (Path.home() / 'runtime.lock').open('a') as lock:
-                fcntl.flock(lock, fcntl.LOCK_EX)
-                return download(links, args.chat_id, dash)
+            return download(links, args.chat_id, dash, runtime_lock=Path.home() / 'runtime.lock')
 
 
 if __name__ == '__main__':

@@ -1,7 +1,7 @@
 [Unit]
 Description=Verified LivingGaul Oracle to Seagate pull
-StartLimitIntervalSec=30min
-StartLimitBurst=3
+# Offline Oracle or an unplugged disk must not permanently stop automatic pulls.
+StartLimitIntervalSec=0
 
 [Service]
 Type=oneshot
