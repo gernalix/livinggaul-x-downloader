@@ -272,3 +272,34 @@ chiusura della finestra con la X interrompono il servizio remoto di quella
 specifica esecuzione. Il launcher usa una connessione di controllo separata per
 fermarlo dopo la chiusura dell'SSH interattivo. Se Oracle non è raggiungibile,
 segnala che l'arresto remoto non è stato confermato.
+
+## Archivio comune e ingressi indipendenti
+
+`x_input.py` scopre i post X; `telegram_video_downloader.py` legge i link Telegram.
+Entrambi importano `video_engine.py`, senza eseguire lo script dell'altro ingresso
+né sostituire funzioni globali. La CLI `livinggaul-x-downloader` resta compatibile.
+
+Il database e l'archivio Oracle/Seagate rimangono unici, con gli stessi percorsi.
+La migrazione alla versione 6 aggiunge `acquisition_sources`, `video_origins` e
+`video_library`: conserva righe, ID, snapshot originali, collegamenti ai duplicati
+e ACK dell'archivio. `video_library` elenca i video canonici; `video_origins`
+collega ogni video alle fonti, all'ingresso e al canale/messaggio Telegram quando
+noti. `video_catalog` e `metadata_snapshots` mantengono tutti i metadati esistenti.
+La provenienza storica viene ricavata dai metadati già salvati; per le fonti non
+identificabili resta `legacy`, senza inventare canali o messaggi mancanti.
+
+Download, conversione e calcolo dei metadati avvengono in directory private
+`staging/.work/<hash-URL>`, senza bloccare il catalogo. Una stessa URL ha un lock
+dedicato; URL diverse possono procedere in parallelo. Alla fine, sotto il breve
+lock del catalogo, si ricontrollano duplicati e disponibilità, si pubblica il file
+nello staging e si registrano metadati e provenienza. I tentativi interrotti
+restano nelle proprie directory recuperabili; nessuna pulizia automatica dei
+file storici viene eseguita. Il vecchio archivio testuale yt-dlp è conservato;
+le nuove acquisizioni usano archivi di lavoro separati e SQLite come autorità.
+
+Le unità X usano `x-input.lock`, mentre la sessione Telegram conserva il proprio
+lock. `runtime.lock` protegge pubblicazione e operazioni di archivio; l'invio
+notifiche e le esportazioni hanno lock separati. Limiti di risorse, verifica
+hash/ACK prima della rimozione dallo staging e assenza di notifiche per i
+video acquisiti da Telegram restano in vigore. Le sessioni avviate prima del
+rilascio continuano con il codice già caricato; non vengono terminate.

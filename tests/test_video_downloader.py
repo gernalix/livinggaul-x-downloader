@@ -138,29 +138,17 @@ class VideoTests(unittest.TestCase):
         self.assertGreaterEqual(dash.draw.call_count, 2)
 
     def test_real_catalog_metadata_dedup_and_no_notifications(self):
-        engine = runpy.run_path(str(ROOT / 'livinggaul-x-downloader'))
+        import video_engine
+        engine = vars(video_engine)
         globals_ = engine['download_one'].__globals__
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             db = root / 'existing.sqlite'
             lock_file = root / 'runtime.lock'
-            released_queue_sizes = []
-            original_lock = video.catalog_lock
-            @contextlib.contextmanager
-            def observe_handoff(path, dashboard):
-                with original_lock(path, dashboard):
-                    yield
-                # A puller can acquire the same lock and see committed staged
-                # rows before the next link is processed (only fixture data).
+            def fake_run(command, **kwargs):
+                # Catalog publication must remain available during transfer.
                 with lock_file.open('a') as probe:
                     video.fcntl.flock(probe, video.fcntl.LOCK_EX | video.fcntl.LOCK_NB)
-                    connection = engine['connect_db'](db)
-                    released_queue_sizes.append(len(globals_['pipeline'].queue(connection)))
-                    connection.close()
-            def fake_run(command, **kwargs):
-                with lock_file.open('a') as probe:
-                    with self.assertRaises(BlockingIOError):
-                        video.fcntl.flock(probe, video.fcntl.LOCK_EX | video.fcntl.LOCK_NB)
                 target = Path(command[command.index('--output') + 1].replace('%(ext)s', 'mp4'))
                 target.write_bytes(b'fixture content')
                 return subprocess.CompletedProcess(command, 0, '', '')
@@ -175,12 +163,10 @@ class VideoTests(unittest.TestCase):
                     ffprobe_file_metadata=lambda path: {'width': 640, 'height': 480, 'duration_ms': 1000},
                     video_content_fingerprint=lambda *a: None), patch.object(video, 'progress_run', side_effect=lambda original, *a: original), \
                     patch.object(subprocess, 'Popen', side_effect=AssertionError('Network/process forbidden in catalog test')), \
-                    patch.object(globals_['pipeline'], 'drain') as notify, \
-                    patch.object(video, 'catalog_lock', side_effect=observe_handoff):
+                    patch.object(globals_['pipeline'], 'drain') as notify:
                 result = video.download(['https://x.com/a/status/1234567890123456789',
                                                  'https://example.org/video'], 987, dash, engine, runtime_lock=lock_file)
                 self.assertEqual(result, 0, '\n'.join(p.read_text() for p in (root / 'logs').glob('*')))
-                self.assertEqual(released_queue_sizes, [0, 1, 1])
                 con = engine['connect_db'](db)
                 rows = con.execute('SELECT * FROM video_catalog ORDER BY id').fetchall()
                 self.assertEqual(len(rows), 2)

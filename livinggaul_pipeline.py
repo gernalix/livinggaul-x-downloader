@@ -1,6 +1,6 @@
 """Oracle catalog, durable Telegram delivery, and verified Fedora archive pull.
 
-Mutable data lives outside Git. All Oracle commands share the runtime lock.
+Mutable data lives outside Git. Catalog publication and archive ACK share a short lock; notifications use their own lock.
 An archive ACK is a durable assertion from the hash-verifying Fedora puller.
 """
 from __future__ import annotations
@@ -181,6 +181,12 @@ def resource_check(path, min_free=4*1024**3, min_mem=100*1024**2):
 
 
 def snapshot(con, destination):
+    from catalog_access import file_lock
+    with file_lock(Path(destination).with_suffix('.lock')):
+        return _snapshot(con, destination)
+
+
+def _snapshot(con, destination):
     destination = Path(destination)
     temporary = destination.with_suffix('.partial')
     temporary.unlink(missing_ok=True)
@@ -296,9 +302,10 @@ def main():
         with lock.open('a') as stream:
             fcntl.flock(stream,fcntl.LOCK_EX|fcntl.LOCK_NB);pull(args.host,args.mount)
         return
-    with (ROOT/'runtime.lock').open('a') as stream:
+    coordination = 'notification.lock' if args.action in ('notify','test-notify','reconcile') else 'runtime.lock'
+    with (ROOT/coordination).open('a') as stream:
         fcntl.flock(stream,fcntl.LOCK_EX)
-        con=sqlite3.connect(DB);con.row_factory=sqlite3.Row;con.execute('pragma foreign_keys=on');migrate(con);con.commit()
+        con=sqlite3.connect(DB,timeout=60);con.row_factory=sqlite3.Row;con.execute('pragma foreign_keys=on');migrate(con);con.commit()
         if args.action=='queue': cleanup_acked(con);print(json.dumps(queue(con)))
         elif args.action=='ack':
             p=json.load(__import__('sys').stdin);ack(con,p['id'],p['sha256'],p['size'],p['path']);print('{"ack":true}')

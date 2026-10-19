@@ -10,7 +10,8 @@ import json
 import os
 from pathlib import Path
 import re
-import runpy
+import sys
+from dataclasses import replace
 import selectors
 import signal
 import sqlite3
@@ -193,6 +194,7 @@ async def collect_links(channel, dash):
                     entity = dialog.input_entity
                     break
         links = {}
+        dash.link_messages = {}
         messages = telegram.iter_messages(entity, limit=None).__aiter__()
         while True:
             try:
@@ -202,6 +204,9 @@ async def collect_links(channel, dash):
             dash.messages += 1
             for url in message_links(message):
                 links.setdefault(url, None)
+                message_id = getattr(message, 'id', None)
+                if message_id is not None:
+                    dash.link_messages.setdefault(url, set()).add(str(message_id))
             dash.links = len(links)
             dash.draw()
         return list(links)
@@ -309,121 +314,50 @@ def candidates(engine, links):
     return result
 
 
-@contextlib.contextmanager
-def overrides(target, **values):
-    is_dict = isinstance(target, dict)
-    old = {key: target[key] if is_dict else getattr(target, key) for key in values}
-    try:
-        for key, value in values.items():
-            if is_dict:
-                target[key] = value
-            else:
-                setattr(target, key, value)
-        yield
-    finally:
-        for key, value in old.items():
-            if is_dict:
-                target[key] = value
-            else:
-                setattr(target, key, value)
-
-
-@contextlib.contextmanager
-def catalog_lock(path, dash):
-    if path is None:
-        yield
-        return
-    dash.phase = 'Attesa del catalogo Oracle / trasferimento Fedora'
-    dash.draw(True)
-    with path.open('a') as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(lock, fcntl.LOCK_UN)
-
-
 def download(links, channel, dash, engine=None, runtime_lock=None):
-    engine = engine or runpy.run_path(str(ROOT / 'livinggaul-x-downloader'))
-    globals_ = engine['download_one'].__globals__
-    original_extract = globals_['extract_metadata']
-    original_title = globals_['stable_title']
-    original_fallback = globals_['extract_fxtwitter_metadata']
-    items = candidates(engine, links)
+    if engine is None:
+        # Import the shared library; never execute or modify the X CLI.
+        sys.path.insert(0, str(ROOT))
+        import video_engine
+        engine = vars(video_engine)
+    items = [replace(item, source_context=str(channel),
+                     source_references=tuple(sorted(getattr(dash, 'link_messages', {}).get(item.url, ()))))
+             for item in candidates(engine, links)]
     dash.total = len(items)
-
+    output, db = engine['DEFAULT_OUTPUT_DIR'], engine['DEFAULT_DB_PATH']
+    engine['mkdirs'](output, db)
+    options = argparse.Namespace(output_dir=output, cookies_mode='none', firefox_profile=None,
+                                 dry_run=False, retry_failed=True)
+    summary = engine['Summary']()
     def extract(options, candidate, logfile):
         dash.phase = 'Ricerca metadati video'
         dash.draw(True)
-        meta = original_extract(options, candidate, logfile)
+        meta = engine['extract_metadata'](options, candidate, logfile)
         meta['telegram_chat_id'] = channel
         dash.found += 1
         dash.current = meta.get('title') or candidate.url
         dash.phase = 'Download / verifica del file'
         dash.draw(True)
         return meta
-
-    def fallback(candidate, logfile):
-        if candidate.tweet_id is None:
-            raise RuntimeError('Link senza video supportato da yt-dlp')
-        return original_fallback(candidate, logfile)
-
-    def title(meta, candidate):
-        value = original_title(meta, candidate)
-        return value if candidate.tweet_id else value + '-' + hashlib.sha256(candidate.url.encode()).hexdigest()[:16]
-
-    # Mantiene lo staging/ACK esistente; questa dashboard non invia notifiche.
-    pipeline = globals_['pipeline']
-    def staged(con, row, metadata):
-        con.execute("UPDATE downloads SET storage_state='staged' WHERE id=?", (row['id'],))
-
     def log(message, logfile=None):
-        # Il log rimane privato su Oracle; non mescola righe alla dashboard.
         if logfile:
             with logfile.open('a', encoding='utf-8') as stream:
                 stream.write(f"{engine['utc_now']()} {message}\n")
-
-    replacements = dict(extract_metadata=extract, extract_fxtwitter_metadata=fallback, stable_title=title,
-                        run=progress_run(globals_['run'], globals_, dash), log=log)
-    output, db = globals_['DEFAULT_OUTPUT_DIR'], globals_['DEFAULT_DB_PATH']
-    engine['mkdirs'](output, db)
-    options = argparse.Namespace(output_dir=output, cookies_mode='none', firefox_profile=None,
-                                 dry_run=False, retry_failed=True)
-    summary = engine['Summary']()
-    # Patch solo nel processo worker, mai il servizio o il sorgente condiviso.
-    with overrides(globals_, **replacements), overrides(pipeline, record_staged=staged,
-            drain=lambda *a, **k: None, enqueue=lambda *a, **k: None):
-        with catalog_lock(runtime_lock, dash):
-            con = engine['connect_db'](db)
-        try:
-            for candidate in items:
-                with catalog_lock(runtime_lock, dash), con:
-                    dash.current = candidate.url
-                    dash.phase = 'Verifica catalogo / metadati'
-                    dash.percent, dash.bytes = None, 0
-                    dash.draw(True)
-                    before = summary.skipped_duplicate
-                    duplicate = con.execute(
-                        "SELECT canonical.* FROM downloads AS link JOIN downloads AS canonical "
-                        "ON canonical.id=link.duplicate_of_id WHERE link.original_url=? "
-                        "AND link.status='skipped_duplicate' AND canonical.status='downloaded'",
-                        (candidate.url,),
-                    ).fetchone()
-                    if duplicate and engine['row_has_existing_file'](duplicate):
-                        summary.posts_analyzed += 1
-                        summary.skipped_duplicate += 1
-                        dash.found += 1
-                    else:
-                        engine['download_one'](options, con, candidate, engine['log_path'](), summary)
-                    if summary.skipped_duplicate > before:
-                        row = con.execute("SELECT status FROM downloads WHERE original_url=?", (candidate.url,)).fetchone()
-                        if row and row['status'] == 'downloaded':
-                            dash.found += 1
-                dash.processed += 1
-                dash.downloaded, dash.skipped, dash.failed = summary.downloaded, summary.skipped_duplicate, summary.failed
-                dash.draw(True)
-        finally:
-            con.close()
+    hooks = {'extract_metadata': extract, 'run': progress_run(engine['run'], engine, dash), 'log': log}
+    con = engine['connect_db'](db)
+    try:
+        for candidate in items:
+            dash.current = candidate.url
+            dash.phase = 'Verifica catalogo / metadati'
+            dash.percent, dash.bytes = None, 0
+            dash.draw(True)
+            engine['download_one'](options, con, candidate, engine['log_path'](), summary,
+                                   hooks=hooks, runtime_lock=runtime_lock)
+            dash.processed += 1
+            dash.downloaded, dash.skipped, dash.failed = summary.downloaded, summary.skipped_duplicate, summary.failed
+            dash.draw(True)
+    finally:
+        con.close()
     dash.phase = 'Completato' if not summary.failed else 'Terminato con errori / link non video'
     dash.draw(True)
     return int(bool(summary.failed))

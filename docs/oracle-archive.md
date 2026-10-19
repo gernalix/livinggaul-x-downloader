@@ -17,8 +17,11 @@ State: `/home/livinggaul/.local/state/livinggaul-x-downloader/`, staging
 credentials under `/etc/livinggaul/` enter services through `LoadCredential`.
 No cookie transfer, bot creation, incoming Telegram consumer or Pn-bot change.
 
-All Oracle units and SSH queue/ACK/snapshot commands serialize on
-`/home/livinggaul/runtime.lock`. Oneshots use bounded restarts and timeouts,
+Catalog publication and SSH archive queue/ACK operations serialize on
+`/home/livinggaul/runtime.lock`. X inputs use `x-input.lock`; Telegram has a
+separate session lock. Downloads and conversions run outside the catalog lock
+in private staging workspaces. Notifications and snapshot exports have separate
+locks. Oneshots use bounded restarts and timeouts,
 CPU 35%, memory high 160 MiB/max 220 MiB, swap 64 MiB, low I/O priority.
 Downloads cap individual files at 512 MiB; guard checks available RAM >=100 MiB,
 disk free >=4 GiB and staging <=6 GiB before subprocesses and every 5 seconds
