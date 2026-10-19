@@ -154,5 +154,25 @@ class SharedArchiveTests(unittest.TestCase):
                 engine.extract_metadata(options,candidate,None)
             fallback.assert_not_called()
 
+    def test_telegram_x_link_keeps_its_url_channel_and_message(self):
+        import telegram_video_downloader as telegram
+        from dataclasses import replace
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp); output=root/'staging';output.mkdir();media=output/'historical.mp4';media.write_bytes(b'old')
+            con=engine.connect_db(root/'catalog.sqlite')
+            original=engine.Candidate('1234567890123456789','https://x.com/LivingGaul/status/1234567890123456789',source='x')
+            engine.upsert_status(con,original,'downloaded',file_path=str(media),sha256=hashlib.sha256(b'old').hexdigest(),size_bytes=3)
+            url='https://x.com/another_author/status/1234567890123456789'
+            candidate=telegram.candidates(vars(engine),[url])[0]
+            self.assertEqual(candidate.url,url)
+            candidate=replace(candidate,source_context='987',source_references=('42','43'))
+            summary=engine.Summary();options=argparse.Namespace(output_dir=output,dry_run=False,retry_failed=True)
+            engine.download_one(options,con,candidate,None,summary,hooks={'extract_metadata':lambda *a:self.fail('must not redownload'),'log':lambda *a:None})
+            self.assertEqual(summary.skipped_duplicate,1)
+            refs=[tuple(r) for r in con.execute("SELECT original_url,context,reference FROM video_origins WHERE input='telegram' ORDER BY reference")]
+            self.assertEqual(refs,[(url,'987','42'),(url,'987','43')])
+            self.assertEqual(con.execute('SELECT count(*) FROM video_library').fetchone()[0],1)
+            self.assertEqual(media.read_bytes(),b'old');con.close()
+
 
 if __name__ == '__main__': unittest.main()

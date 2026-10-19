@@ -1436,8 +1436,13 @@ def _download_one(args, con, candidate, logfile, summary, hooks, catalog):
     row = already_downloaded(con, candidate)
     if row:
         with file_lock(catalog):
-            record_origin(con, candidate)
-            con.commit()
+            if row['original_url'] != candidate.url:
+                record_duplicate(con, candidate, row, direct_video_url=None,
+                                 media_key=row['media_key'], source_metadata={},
+                                 reason='same known video through another source URL')
+            else:
+                record_origin(con, candidate)
+                con.commit()
         summary.skipped_duplicate += 1
         log(f"skip downloaded tweet_id={candidate.tweet_id} file={row['file_path']}", logfile)
         return

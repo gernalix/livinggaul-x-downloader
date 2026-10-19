@@ -432,11 +432,10 @@ def candidates(engine, links):
     for url in links:
         match = re.fullmatch(r'https?://(?:www\.)?(?:x|twitter)\.com/[^/]+/status/(\d+)(?:[/?#].*)?', url)
         post = match[1] if match else None
-        key = post or url
+        key = url
         if key not in seen:
             seen.add(key)
-            result.append(engine['canonical_candidate'](post, 'telegram') if post else
-                          engine['Candidate'](None, url, source='telegram'))
+            result.append(engine['Candidate'](post, url, source='telegram'))
     return result
 
 
