@@ -30,7 +30,7 @@
       "key": "telegram_video_downloader",
       "display_title": "Scarica video da Telegram",
       "host_scope": "H0001",
-      "entrypoint": "~/.local/bin/video_downloader",
+      "entrypoint": "video_downloader",
       "argv": [
         "--window",
         "--",

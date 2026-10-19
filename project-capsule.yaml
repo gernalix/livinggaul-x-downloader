@@ -10,7 +10,7 @@ scope:
     - Video files, browser cookies, logs, archive history, and SQLite state remain in user-owned paths outside Git.
     - Source-availability checks do not download video, while normal run/retry commands may download or delete duplicate local files.
 repository:
-  canonical_workdir: ~/projects/livinggaul-x-downloader
+  canonical_workdir: .
   branch_policy: Canonical repository follows origin/master; make changes in isolated repo-task worktrees and integrate through the guarded single-writer lane.
 architecture:
   summary: A Python CLI discovers X posts, downloads bounded-quality video with yt-dlp, records metadata in a local SQLite database, deduplicates downloads by media key/hash/fingerprint, and can check source availability with a user systemd timer.
@@ -66,10 +66,10 @@ commands:
     not_applicable: A live run or availability probe contacts X/Nitter and reads/writes user-local video or SQLite state; this is a separately gated operation.
   verify:
     fast:
-      argv: [python3, ~/projects/codex-roadmap/tools/project_capsule.py, --repo, ., --mode, FAST]
+      argv: [python3, ../codex-roadmap/tools/project_capsule.py, --repo, ., --mode, FAST]
       cwd: .
     full:
-      argv: [python3, ~/projects/codex-roadmap/tools/project_capsule.py, --repo, ., --mode, FULL]
+      argv: [python3, ../codex-roadmap/tools/project_capsule.py, --repo, ., --mode, FULL]
       cwd: .
 safety:
   invariants:
@@ -89,8 +89,8 @@ acceptance:
   - Targeted and full tests pass with temporary database fixtures and without live network or user data access.
   - Live download, source-availability operation, timer installation, and media recovery are documented as separately gated.
 references:
-  megavault: ~/MegaVault/megavault.sqlite
-  c2: ~/projects/codex-roadmap/roadmap.sqlite
+  megavault: external MegaVault runtime inventory
+  c2: external historical archive (retired)
 freshness:
   reviewed_commit: 7b3b263ce9aa52359c46106a6beeba58851e7700
   watch_paths:
