@@ -229,6 +229,12 @@ Riusa `/srv/livinggaul/repo/livinggaul-x-downloader`, il lock
 I file vengono scaricati nello staging Oracle `/home/livinggaul/staging`,
 non nella cartella Download di Fedora; il processo di archivio esistente gestisce
 il successivo trasferimento a Seagate.
+Il comando rilascia il lock del catalogo dopo ogni video: il puller Fedora può
+prelevare i file completati senza aspettare tutto il canale. Il timer
+`livinggaul-archive-pull.timer` deve essere abilitato e riprova cinque minuti dopo
+ogni esecuzione; l'assenza temporanea del disco o di Oracle non deve esaurire un
+limite permanente di riavvii. Destinazione e verifica/ACK restano quelli della
+pipeline originale: `/mnt/Seagate6TB/LivingGaul_X/videos/`.
 Gli altri siti supportati da yt-dlp usano lo stesso percorso di metadati,
 ffprobe, hash e deduplicazione dei link X; hanno `tweet_id` NULL. Lo snapshot
 JSON include `telegram_chat_id`. Non esegue la scoperta della timeline LivingGaul
@@ -261,5 +267,5 @@ video_downloader --demo   # dashboard con dati fittizi, senza download o SQLite 
 
 Il launcher usa unità systemd transitorie con i limiti di risorse Oracle già
 previsti e durata massima 24 ore. Il programma prende prima il lock della
-sessione Telegram e poi quello del catalogo per i download. Ctrl+C interrompe;
+sessione Telegram e quello del catalogo per ogni singolo video. Ctrl+C interrompe;
 la chiusura del terminale interrompe anche il processo remoto.

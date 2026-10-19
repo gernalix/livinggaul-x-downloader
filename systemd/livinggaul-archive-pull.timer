@@ -2,7 +2,7 @@
 Description=Pull LivingGaul when Fedora and Seagate are available
 [Timer]
 OnBootSec=2min
-OnUnitActiveSec=5min
+OnUnitInactiveSec=5min
 Unit=livinggaul-archive-pull.service
 [Install]
 WantedBy=timers.target
