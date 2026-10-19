@@ -102,6 +102,12 @@ class VideoTests(unittest.TestCase):
                 self.assertTrue(all(json.loads(row[0])['telegram_chat_id'] == 987 for row in snapshots))
                 con.close()
                 notify.assert_not_called()
+                second = video.Dashboard(987, io.StringIO())
+                self.assertEqual(video.download(['https://x.com/a/status/1234567890123456789',
+                                                 'https://example.org/video'], 987, second, engine), 0)
+                self.assertEqual((second.processed, second.downloaded, second.skipped), (2, 0, 2))
+                self.assertEqual(globals_['extract_metadata'].call_count, 2)
+
             self.assertEqual((dash.processed, dash.downloaded, dash.skipped), (2, 1, 1))
 
     def test_progress_stream_from_process_without_network(self):

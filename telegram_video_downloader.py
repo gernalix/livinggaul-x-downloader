@@ -302,7 +302,18 @@ def download(links, channel, dash, engine=None):
                 dash.percent, dash.bytes = None, 0
                 dash.draw(True)
                 before = summary.skipped_duplicate
-                engine['download_one'](options, con, candidate, engine['log_path'](), summary)
+                duplicate = con.execute(
+                    "SELECT canonical.* FROM downloads AS link JOIN downloads AS canonical "
+                    "ON canonical.id=link.duplicate_of_id WHERE link.original_url=? "
+                    "AND link.status='skipped_duplicate' AND canonical.status='downloaded'",
+                    (candidate.url,),
+                ).fetchone()
+                if duplicate and engine['row_has_existing_file'](duplicate):
+                    summary.posts_analyzed += 1
+                    summary.skipped_duplicate += 1
+                    dash.found += 1
+                else:
+                    engine['download_one'](options, con, candidate, engine['log_path'](), summary)
                 if summary.skipped_duplicate > before:
                     row = con.execute("SELECT status FROM downloads WHERE original_url=?", (candidate.url,)).fetchone()
                     if row and row['status'] == 'downloaded':

@@ -221,7 +221,11 @@ Gli altri siti supportati da yt-dlp usano lo stesso percorso di metadati,
 ffprobe, hash e deduplicazione dei link X; hanno `tweet_id` NULL. Lo snapshot
 JSON include `telegram_chat_id`. Non esegue la scoperta della timeline LivingGaul
 e non invia notifiche: mantiene lo staging per la pipeline Oracle/Seagate.
-Per riprendere, rilanciare lo stesso canale; gli errori vengono ritentati.
+Prima di ogni trasferimento controlla il link nel catalogo: salta i video già
+scaricati e i link già classificati duplicati se il relativo file canonico è
+presente o archiviato con ACK. Se il file manca, tenta il recupero. Per link nuovi
+la deduplicazione per contenuto può richiedere il trasferimento. Per riprendere,
+rilanciare lo stesso canale; gli errori vengono ritentati.
 
 La cronologia è quella ancora accessibile all'account. Include link HTTP/HTTPS
 nel testo, nelle didascalie, nei link nascosti e nei pulsanti URL; gli allegati
