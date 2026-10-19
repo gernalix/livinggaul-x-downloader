@@ -213,6 +213,11 @@ scaricati, duplicati, errori/non video, titolo/link corrente e percentuale del
 trasferimento in corso. Il progresso globale è la percentuale dei **link
 elaborati**, non una stima dei byte complessivi ancora da scoprire. La percentuale
 del download usa la dimensione fornita o stimata da yt-dlp; se manca resta ignota.
+Connessione, verifica della sessione, ricerca del canale e lettura della cronologia
+mostrano fasi distinte. Durante le attese Telegram il terminale si aggiorna ogni
+secondo; ogni operazione ha un limite di 60 secondi e produce un errore senza
+includere il chat_id. Una sessione nuova cerca il canale nei dialoghi accessibili
+e si ferma appena lo trova.
 
 Riusa `/srv/livinggaul/repo/livinggaul-x-downloader`, il lock
 `/home/livinggaul/runtime.lock`, lo staging e il catalogo principale

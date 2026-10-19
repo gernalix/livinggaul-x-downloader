@@ -62,6 +62,52 @@ class VideoTests(unittest.TestCase):
         self.assertEqual(dash.messages, 3)
         telegram.disconnect.assert_awaited_once()
 
+    def test_connection_timeout_cancels_and_disconnects(self):
+        cancelled = []
+        async def blocked():
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.append(True)
+        telegram = NS(connect=blocked, disconnect=AsyncMock())
+        dash = video.Dashboard(987, io.StringIO())
+        step = video.telegram_step
+        async def short_step(awaitable, dash, phase):
+            return await step(awaitable, dash, phase, timeout=0.02)
+        with patch.object(video, 'client', return_value=telegram), \
+                patch.object(video, 'telegram_step', side_effect=short_step):
+            with self.assertRaisesRegex(RuntimeError, 'tempo limite.*Connessione Telegram') as error:
+                asyncio.run(video.collect_links(987, dash))
+        self.assertNotIn('987', str(error.exception))
+        self.assertEqual(cancelled, [True])
+        telegram.disconnect.assert_awaited_once()
+
+    def test_fresh_session_stops_dialog_search_at_requested_channel(self):
+        telegram = NS(connect=AsyncMock(), disconnect=AsyncMock(), is_user_authorized=AsyncMock(return_value=True),
+                      get_input_entity=AsyncMock(side_effect=ValueError('not cached')))
+        async def dialogs(**kwargs):
+            yield NS(id=-1000000000001, input_entity='other')
+            yield NS(id=-1000000000987, input_entity='target')
+            self.fail('Must not read unrelated dialogs after finding target')
+        async def messages(entity, **kwargs):
+            self.assertEqual(entity, 'target')
+            yield NS(message='https://example.org/video')
+        telegram.iter_dialogs, telegram.iter_messages = dialogs, messages
+        dash = video.Dashboard(987, io.StringIO())
+        with patch.object(video, 'client', return_value=telegram):
+            self.assertEqual(asyncio.run(video.collect_links(987, dash)), ['https://example.org/video'])
+        self.assertIn('Verifica della sessione Telegram', dash.stream.getvalue())
+        self.assertIn('Ricerca nei dialoghi Telegram', dash.stream.getvalue())
+        telegram.disconnect.assert_awaited_once()
+
+    def test_network_wait_keeps_dashboard_refreshing(self):
+        dash = Mock(phase='old')
+        async def request():
+            await asyncio.sleep(0.02)
+            return 'ready'
+        self.assertEqual(asyncio.run(video.telegram_step(request(), dash, 'Connessione', timeout=1)), 'ready')
+        self.assertGreaterEqual(dash.draw.call_count, 2)
+
     def test_real_catalog_metadata_dedup_and_no_notifications(self):
         engine = runpy.run_path(str(ROOT / 'livinggaul-x-downloader'))
         globals_ = engine['download_one'].__globals__

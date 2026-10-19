@@ -23,6 +23,7 @@ sys.path.insert(0, str(ROOT))
 STATE = Path.home() / '.local/state/video_downloader'
 CONFIG = Path.home() / '.config/video_downloader/telegram.json'
 SESSION = STATE / 'telegram'
+REQUEST_TIMEOUT = 60
 
 
 def chat_id(value):
@@ -97,25 +98,70 @@ class Dashboard:
 def client(receive_updates=False):
     from telethon import TelegramClient
     cfg = json.loads(CONFIG.read_text())
-    return TelegramClient(str(SESSION), int(cfg['api_id']), cfg['api_hash'], receive_updates=receive_updates)
+    return TelegramClient(str(SESSION), int(cfg['api_id']), cfg['api_hash'], receive_updates=receive_updates,
+                          timeout=10, connection_retries=2, request_retries=2,
+                          retry_delay=1, flood_sleep_threshold=0)
+
+
+async def telegram_step(awaitable, dash, phase, timeout=REQUEST_TIMEOUT):
+    """Keep the terminal alive and bound each network wait, without logging peers."""
+    changed = dash.phase != phase
+    dash.phase = phase
+    dash.draw(changed)
+    task = asyncio.ensure_future(awaitable)
+    deadline = time.monotonic() + timeout
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError(f'Telegram: tempo limite durante «{phase}». '
+                                   'Rilancia il comando; non occorre comunicare il chat_id.')
+            done, _ = await asyncio.wait({task}, timeout=min(1, remaining))
+            dash.draw()
+            if done:
+                return task.result()
+    finally:
+        if not task.done():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
 
 
 async def collect_links(channel, dash):
     from telethon.tl.types import PeerChannel
+    from telethon.utils import get_peer_id
     telegram = client()
-    await telegram.connect()
     try:
-        if not await telegram.is_user_authorized():
+        await telegram_step(telegram.connect(), dash, 'Connessione Telegram')
+        if not await telegram_step(telegram.is_user_authorized(), dash, 'Verifica della sessione Telegram'):
             raise RuntimeError('Telegram non autorizzato. Esegui video_downloader --login e scansiona il QR.')
         peer = PeerChannel(channel) if channel > 0 else channel
         try:
-            entity = await telegram.get_input_entity(peer)
+            entity = await telegram_step(telegram.get_input_entity(peer), dash, 'Ricerca del canale')
         except ValueError:
-            await telegram.get_dialogs(limit=None)
-            entity = await telegram.get_input_entity(peer)
-        dash.phase = 'Lettura della cronologia accessibile'
+            # A fresh QR session has no cached access hashes. Stop as soon as
+            # the requested dialog is found instead of loading every dialog.
+            dialogs = telegram.iter_dialogs(limit=None).__aiter__()
+            target = get_peer_id(peer)
+            count = 0
+            while True:
+                try:
+                    dialog = await telegram_step(anext(dialogs), dash,
+                                                 f'Ricerca nei dialoghi Telegram · esaminati {count}')
+                except StopAsyncIteration:
+                    raise RuntimeError('Canale non trovato tra i dialoghi accessibili. '
+                                       'Controlla localmente il chat_id e l’account collegato.') from None
+                count += 1
+                if dialog.id == target:
+                    entity = dialog.input_entity
+                    break
         links = {}
-        async for message in telegram.iter_messages(entity, limit=None):
+        messages = telegram.iter_messages(entity, limit=None).__aiter__()
+        while True:
+            try:
+                message = await telegram_step(anext(messages), dash, 'Lettura della cronologia accessibile')
+            except StopAsyncIteration:
+                break
             dash.messages += 1
             for url in message_links(message):
                 links.setdefault(url, None)
@@ -123,7 +169,8 @@ async def collect_links(channel, dash):
             dash.draw()
         return list(links)
     finally:
-        await telegram.disconnect()
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(telegram.disconnect(), timeout=10)
 
 
 async def login():
@@ -371,6 +418,7 @@ def main(argv=None):
         if args.login:
             return asyncio.run(login())
         dash = Dashboard(args.chat_id)
+        dash.phase = 'Caricamento del client Telegram su Oracle'
         dash.draw(True)
         links = asyncio.run(collect_links(args.chat_id, dash))
         dash.phase = 'Attesa del lock del catalogo Oracle'
