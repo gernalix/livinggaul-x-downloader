@@ -79,7 +79,7 @@ class VideoTests(unittest.TestCase):
                     DEFAULT_OUTPUT_DIR=root / 'output', DEFAULT_DB_PATH=db,
                     DEFAULT_STATE_DIR=root, DEFAULT_LOG_DIR=root / 'logs', DEFAULT_ARCHIVE=root / 'archive.txt',
                     extract_metadata=Mock(side_effect=lambda *a: dict(metadata)),
-                    run=fake_run, ensure_max_480=lambda path, log: (path, '480p'),
+                    run=fake_run, tool_path=lambda name: name, ensure_max_480=lambda path, log: (path, '480p'),
                     ffprobe_file_metadata=lambda path: {'width': 640, 'height': 480, 'duration_ms': 1000},
                     video_content_fingerprint=lambda *a: None), patch.object(video, 'progress_run', side_effect=lambda original, *a: original), \
                     patch.object(subprocess, 'Popen', side_effect=AssertionError('Network/process forbidden in catalog test')), \
@@ -134,9 +134,13 @@ class VideoTests(unittest.TestCase):
         fake = Mock(wait=Mock(return_value=0))
         globals_ = LAUNCHER['main'].__globals__
         with patch.dict(globals_, shutil=NS(which=lambda name: '/usr/bin/ptyxis')), \
+                patch.dict(os.environ, DISPLAY='', WAYLAND_DISPLAY=''), \
+                patch.object(subprocess, 'run', return_value=NS(stdout='WAYLAND_DISPLAY=wayland-fixture\n')) as manager, \
                 patch.object(subprocess, 'Popen', return_value=fake) as spawn:
             with contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(LAUNCHER['main'](['--', '-100987']), 0)
         command = spawn.call_args.args[0]
         self.assertEqual(command[-3:], ['--terminal-session', '--', '-100987'])
         self.assertIn('--new-window', command)
+        self.assertEqual(spawn.call_args.kwargs['env']['WAYLAND_DISPLAY'], 'wayland-fixture')
+        manager.assert_called_once()
