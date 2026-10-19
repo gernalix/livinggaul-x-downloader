@@ -29,13 +29,13 @@ def remote_command(arguments):
             '-p', 'Environment=LIVINGGAUL_MANAGED=1',
             '-p', 'Environment=LIVINGGAUL_OUTPUT=/home/livinggaul/staging',
             '-p', 'Environment=VIDEO_DOWNLOADER_DASH=1',
-            '-p', 'Environment=LIVINGGAUL_ENGINE_ROOT=/srv/livinggaul/repo',
+            '-p', 'Environment=LIVINGGAUL_ENGINE_ROOT=/srv/livinggaul/current',
             '-p', 'UMask=0077', '-p', 'CPUQuota=35%', '-p', 'MemoryMax=220M',
             '-p', 'MemorySwapMax=64M', '-p', 'TasksMax=24', '-p', 'Nice=15',
             '-p', 'NoNewPrivileges=true', '-p', 'ProtectSystem=strict',
             '-p', 'ProtectHome=read-only', '-p', 'ReadWritePaths=/home/livinggaul',
             '-p', 'PrivateTmp=true', '-p', 'TimeoutStartSec=24h', '-p', 'TimeoutStopSec=30s',
-            '/srv/livinggaul/venv/bin/python', '/srv/livinggaul/video-downloader/telegram_video_downloader.py', *arguments]
+            '/srv/livinggaul/venv/bin/python', '/srv/livinggaul/current/telegram_video_downloader.py', *arguments]
 
 
 def connect(arguments):

@@ -32,7 +32,7 @@ command=['sudo','-n','systemd-run','--wait','--pipe','--collect','--unit=livingg
     '-p','ReadWritePaths=/home/livinggaul','-p','PrivateTmp=true',
     '-p','TimeoutStartSec=45min','-p','TimeoutStopSec=30s',
     '/usr/bin/flock','--exclusive','--wait','30','/home/livinggaul/x-input.lock',
-    '/srv/livinggaul/venv/bin/python','/srv/livinggaul/repo/livinggaul-x-downloader',action,'--cookies-mode','none']
+    '/srv/livinggaul/venv/bin/python','/srv/livinggaul/current/livinggaul-x-downloader',action,'--cookies-mode','none']
 if action in ('--status','--list-failed'):
     index=command.index('/usr/bin/flock')
     command=command[:index]+command[index+6:]

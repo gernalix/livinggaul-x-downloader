@@ -223,7 +223,7 @@ secondo; ogni operazione ha un limite di 60 secondi e produce un errore senza
 includere il chat_id. Una sessione nuova cerca il canale nei dialoghi accessibili
 e si ferma appena lo trova.
 
-Riusa `/srv/livinggaul/repo/livinggaul-x-downloader`, il lock
+Riusa il motore comune importabile, il lock breve
 `/home/livinggaul/runtime.lock`, lo staging e il catalogo principale
 `/home/livinggaul/.local/state/livinggaul-x-downloader/download_history.sqlite`.
 I file vengono scaricati nello staging Oracle `/home/livinggaul/staging`,
@@ -252,7 +252,7 @@ video possono fallire. Non usa cookie browser su Oracle.
 
 Prima installazione: aggiungere `requirements-video-downloader.txt` al runtime
 Python Oracle esistente. Il modulo viene installato separatamente in
-`/srv/livinggaul/video-downloader/telegram_video_downloader.py` e il launcher in
+`/srv/livinggaul/current/telegram_video_downloader.py` e il launcher in
 `~/.local/libexec/video_downloader/video_downloader`, collegato in `~/.local/bin`.
 Configurazione API privata: `/home/livinggaul/.config/video_downloader/telegram.json`
 con `api_id` e `api_hash`; sessione dedicata in
@@ -303,3 +303,9 @@ notifiche e le esportazioni hanno lock separati. Limiti di risorse, verifica
 hash/ACK prima della rimozione dallo staging e assenza di notifiche per i
 video acquisiti da Telegram restano in vigore. Le sessioni avviate prima del
 rilascio continuano con il codice già caricato; non vengono terminate.
+
+Il rilascio Oracle usa directory immutabili sotto `/srv/livinggaul/releases/`
+e il collegamento `/srv/livinggaul/current`. I nuovi processi usano il rilascio
+selezionato; quelli già avviati proseguono con il codice caricato. Un rollback
+cambia soltanto codice e unità: non ripristina un vecchio database sopra dati,
+notifiche o ACK nuovi. La copia pre-migrazione rimane privata su Oracle.

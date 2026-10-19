@@ -13,6 +13,8 @@ import re
 import sys
 from dataclasses import replace
 import selectors
+import shutil
+import unicodedata
 import signal
 import sqlite3
 import subprocess
@@ -27,6 +29,61 @@ STATE = Path.home() / '.local/state/video_downloader'
 CONFIG = Path.home() / '.config/video_downloader/telegram.json'
 SESSION = STATE / 'telegram'
 REQUEST_TIMEOUT = 60
+PROGRESS_FIELDS = {'version', 'pid', 'updated_at', 'running', 'phase_code', 'phase_seconds', 'elapsed_seconds',
+                   'messages', 'links', 'total', 'processed', 'confirmed', 'downloaded',
+                   'duplicates', 'failed', 'download_bytes', 'download_percent', 'speed', 'eta'}
+
+
+def private_status():
+    result = {'catalog': None, 'progress': None}
+    try:
+        counts = archive_counts(Path.home() / '.local/state/livinggaul-x-downloader/download_history.sqlite')
+        result['catalog'] = {k: v for k, v in counts.items() if k.startswith('global_') or k == 'last_ack_epoch'}
+    except (OSError, sqlite3.Error):
+        pass
+    try:
+        raw = json.loads((STATE / 'progress.json').read_text())
+        data = {k: v for k, v in raw.items() if k in PROGRESS_FIELDS and (v is None or isinstance(v, (int, float, bool)))}
+        # A numeric status endpoint must never return the current item or channel.
+        if isinstance(raw.get('archive'), dict):
+            data['archive'] = {k: v for k, v in raw['archive'].items() if k in
+                               {'global_confirmed', 'global_waiting', 'last_ack_epoch', 'run_completed', 'run_confirmed', 'run_waiting'}
+                               and (v is None or isinstance(v, int))}
+        result['progress'] = data
+    except (OSError, ValueError, TypeError, AttributeError):
+        pass
+    return result
+
+
+def fitted_line(value, columns):
+    result, width = [], 0
+    for char in value:
+        size = 0 if unicodedata.combining(char) or unicodedata.category(char) == 'Cf' else (2 if unicodedata.east_asian_width(char) in 'WF' else 1)
+        if width + size > columns - 1:
+            break
+        result.append(char)
+        width += size
+    return ''.join(result)
+
+
+def archive_counts(path, ids=()):
+    """Only aggregate catalog states; never open archived/staged files."""
+    with contextlib.closing(sqlite3.connect(path.as_uri() + '?mode=ro', uri=True, timeout=1)) as con:
+        con.execute('PRAGMA query_only=ON')
+        global_row = con.execute("SELECT coalesce(sum(storage_state='archived' AND archive_ack_at IS NOT NULL),0), "
+                                 "coalesce(sum(storage_state='staged'),0), max(archive_ack_at) "
+                                 "FROM downloads WHERE status='downloaded'").fetchone()
+        totals = [0, 0, 0]
+        ids = tuple(ids)
+        for offset in range(0, len(ids), 500):
+            chunk = ids[offset:offset + 500]
+            row = con.execute("SELECT count(*), coalesce(sum(storage_state='archived' AND archive_ack_at IS NOT NULL),0), "
+                              "coalesce(sum(storage_state='staged'),0) FROM downloads WHERE status='downloaded' AND id IN (" +
+                              ','.join('?' for _ in chunk) + ')', chunk).fetchone()
+            totals = [a + b for a, b in zip(totals, row)]
+    return dict(global_confirmed=global_row[0], global_waiting=global_row[1], last_ack_epoch=global_row[2],
+                run_completed=totals[0], run_confirmed=totals[1], run_waiting=totals[2])
+
 
 
 def chat_id(value):
@@ -67,10 +124,29 @@ class Dashboard:
         self.current = '—'
         self.percent = None
         self.bytes = 0
+        self.speed = None
+        self.eta = None
         self.last = 0
         self.started = time.monotonic()
         self.ansi = self.stream.isatty() or os.environ.get('VIDEO_DOWNLOADER_DASH') == '1'
         self._draw_lock = threading.RLock()
+        self.catalog_path = None
+        self.run_ids = set()
+        self.archive = None
+        self._last_catalog = 0
+        self.telemetry_path = None
+        self._last_telemetry = 0
+        self.running = True
+
+    @property
+    def phase(self):
+        return self._phase
+
+    @phase.setter
+    def phase(self, value):
+        if value != getattr(self, '_phase', None):
+            self._phase_started = time.monotonic()
+        self._phase = value
 
     @contextlib.contextmanager
     def live(self, interval=1):
@@ -90,6 +166,7 @@ class Dashboard:
             stopped.set()
             worker.join(timeout=2)
             with self._draw_lock:
+                self.running = False
                 if self.ansi:
                     self.stream.write('\033[?25h\033[?1049l')
                     self.stream.flush()
@@ -104,6 +181,8 @@ class Dashboard:
         self.bytes = value.get('downloaded_bytes') or 0
         total = value.get('total_bytes') or value.get('total_bytes_estimate')
         self.percent = min(100, self.bytes * 100 / total) if total else None
+        self.speed = value.get('speed') if isinstance(value.get('speed'), (int, float)) else None
+        self.eta = value.get('eta') if isinstance(value.get('eta'), (int, float)) else None
         self.draw()
 
     def draw(self, force=False):
@@ -115,22 +194,58 @@ class Dashboard:
         if not force and now - self.last < 0.2:
             return
         self.last = now
+        if self.catalog_path and now - self._last_catalog >= 5:
+            self._last_catalog = now
+            try:
+                self.archive = archive_counts(self.catalog_path, self.run_ids)
+            except (OSError, sqlite3.Error):
+                self.archive = None
+        if self.telemetry_path and (force or now - self._last_telemetry >= 1):
+            phases = ('Caricamento', 'Connessione', 'Verifica della sessione', 'Ricerca del canale',
+                      'Lettura della cronologia', 'Attesa del catalogo', 'Verifica catalogo',
+                      'Ricerca metadati', 'Download', 'Verifica tecnica', 'Verifica duplicati',
+                      'Conversione', 'Completato', 'Terminato con errori')
+            data = dict(version=1, pid=os.getpid(), updated_at=time.time(), running=self.running,
+                        phase_code=next((i for i, p in enumerate(phases, 1) if self.phase.startswith(p)), 0),
+                        phase=self.phase, phase_seconds=int(now - self._phase_started),
+                        elapsed_seconds=int(now - self.started), messages=self.messages, links=self.links,
+                        total=self.total, processed=self.processed, confirmed=self.found, downloaded=self.downloaded,
+                        duplicates=self.skipped, failed=self.failed, download_bytes=self.bytes, download_percent=self.percent,
+                        archive=self.archive, speed=self.speed, eta=self.eta)
+            # Deliberately excludes channel ID, current item, title, URL, paths and file identifiers.
+            temporary = self.telemetry_path.with_suffix('.new')
+            try:
+                temporary.write_text(json.dumps(data))
+                temporary.chmod(0o600)
+                temporary.replace(self.telemetry_path)
+                self._last_telemetry = now
+            except OSError:
+                pass
         global_progress = f'{self.processed * 100 / self.total:.1f}%' if self.total else 'in calcolo'
         current_progress = f'{self.percent:.1f}%' if self.percent is not None else 'in attesa / dimensione sconosciuta'
         lines = [f'VIDEO DOWNLOADER — Telegram {self.channel}',
-                 f'Fase: {self.phase} · trascorsi {int(now - self.started)} s',
+                 f'Fase: {self.phase} · fase {int(now - self._phase_started)} s · totale {int(now - self.started)} s',
                  f'Messaggi letti: {self.messages} · link unici: {self.links}',
                  f'Video confermati finora: {self.found} · scaricati su Oracle: {self.downloaded}',
                  f'Già presenti/duplicati: {self.skipped} · errori/non video: {self.failed}',
                  f'Progresso globale sui link: {self.processed}/{self.total or "?"} ({global_progress})',
                  f'In elaborazione: {clean(self.current)}',
-                 f'Download corrente: {current_progress} · {self.bytes / 1048576:.1f} MiB',
-                 'Archivio Fedora: trasferimento automatico del servizio esistente.',
+                 f'Download corrente: {current_progress} · {self.bytes / 1048576:.1f} MiB' +
+                 (f' · {self.speed / 1024:.0f} KiB/s' if self.speed is not None else ''),
+                 (f'Fedora, lotto attuale: confermati {self.archive["run_confirmed"]}/{self.archive["run_completed"]} '
+                  f'· in attesa {self.archive["run_waiting"]}' if self.archive else 'Fedora, lotto attuale: contatori non disponibili'),
+                 (f'Catalogo complessivo: Fedora {self.archive["global_confirmed"]} · in attesa {self.archive["global_waiting"]}'
+                  if self.archive else 'Archivio Fedora: trasferimento automatico del servizio esistente.'),
                  'Ctrl+C interrompe; rilancia lo stesso chat_id per riprendere.']
         prefix = '\033[H' if self.ansi else '\n'
-        suffix = '\033[J' if self.ansi else ''
-        self.stream.write(prefix + '\n'.join(lines) + '\n' + suffix)
+        if self.ansi:
+            columns = shutil.get_terminal_size().columns
+            body = ''.join(fitted_line(line, columns) + '\033[K\n' for line in lines) + '\033[J'
+        else:
+            body = '\n'.join(lines) + '\n'
+        self.stream.write(prefix + body)
         self.stream.flush()
+
 
 
 def client(receive_updates=False):
@@ -254,7 +369,17 @@ async def login():
 def progress_run(original, engine_globals, dash):
     def run(cmd, timeout=180, *, text=True):
         if '--output' not in cmd or '--format' not in cmd:
-            return original(cmd, timeout=timeout, text=text)
+            tool = Path(cmd[0]).name
+            previous = dash.phase
+            if tool == 'ffprobe':
+                dash.phase = 'Verifica tecnica del video'
+            elif tool == 'ffmpeg':
+                dash.phase = 'Verifica duplicati (impronta video)' if '-frames:v' in cmd else 'Conversione a 480p'
+            dash.draw()
+            try:
+                return original(cmd, timeout=timeout, text=text)
+            finally:
+                dash.phase = previous
         command = [*cmd[:1], '--newline', '--progress', '--progress-template',
                    'download:VD_PROGRESS %(progress)j', *cmd[1:]]
         started = time.monotonic()
@@ -300,6 +425,7 @@ def progress_run(original, engine_globals, dash):
     return run
 
 
+
 def candidates(engine, links):
     seen = set()
     result = []
@@ -325,6 +451,7 @@ def download(links, channel, dash, engine=None, runtime_lock=None):
              for item in candidates(engine, links)]
     dash.total = len(items)
     output, db = engine['DEFAULT_OUTPUT_DIR'], engine['DEFAULT_DB_PATH']
+    dash.catalog_path = db
     engine['mkdirs'](output, db)
     options = argparse.Namespace(output_dir=output, cookies_mode='none', firefox_profile=None,
                                  dry_run=False, retry_failed=True)
@@ -343,16 +470,37 @@ def download(links, channel, dash, engine=None, runtime_lock=None):
         if logfile:
             with logfile.open('a', encoding='utf-8') as stream:
                 stream.write(f"{engine['utc_now']()} {message}\n")
-    hooks = {'extract_metadata': extract, 'run': progress_run(engine['run'], engine, dash), 'log': log}
+    def analyze(path, logfile):
+        dash.phase = 'Conversione / verifica della risoluzione'
+        dash.draw(True)
+        path, quality = engine['ensure_max_480'](path, logfile)
+        dash.phase = 'Verifica tecnica del video'
+        dash.draw(True)
+        sha = engine['sha256_file'](path)
+        metadata = engine['ffprobe_file_metadata'](path)
+        dash.phase = 'Verifica duplicati (impronta video)'
+        dash.draw(True)
+        fingerprint = engine['video_content_fingerprint'](path, metadata.get('duration_ms'))
+        return path, quality, sha, metadata, fingerprint
+    hooks = {'extract_metadata': extract, 'run': progress_run(engine['run'], engine, dash),
+             'log': log, 'analyze': analyze}
     con = engine['connect_db'](db)
     try:
         for candidate in items:
             dash.current = candidate.url
             dash.phase = 'Verifica catalogo / metadati'
             dash.percent, dash.bytes = None, 0
+            dash.speed, dash.eta = None, None
             dash.draw(True)
             engine['download_one'](options, con, candidate, engine['log_path'](), summary,
                                    hooks=hooks, runtime_lock=runtime_lock)
+            row = con.execute('SELECT id,duplicate_of_id,status FROM downloads WHERE original_url=?', (candidate.url,)).fetchone()
+            if row:
+                identity = row['duplicate_of_id'] if row['status'] == 'skipped_duplicate' else row['id'] if row['status'] == 'downloaded' else None
+                if identity is not None:
+                    with dash._draw_lock:
+                        dash.run_ids.add(identity)
+            dash._last_catalog = 0
             dash.processed += 1
             dash.downloaded, dash.skipped, dash.failed = summary.downloaded, summary.skipped_duplicate, summary.failed
             dash.draw(True)
@@ -380,9 +528,13 @@ def main(argv=None):
     parser.add_argument('--login', action='store_true')
     parser.add_argument('--check', action='store_true', help='controlla configurazione senza rete')
     parser.add_argument('--demo', action='store_true', help='dashboard con dati fittizi, senza rete')
+    parser.add_argument('--status', action='store_true', help='soli contatori numerici, senza contenuti o file video')
     args = parser.parse_args(argv)
     if args.demo:
         return fixture_demo()
+    if args.status:
+        print(json.dumps(private_status()))
+        return 0
     if not (args.login or args.check) and args.chat_id is None:
         parser.error('Inserisci chat_id oppure --login')
     os.umask(0o077)
@@ -407,6 +559,7 @@ def main(argv=None):
         if args.login:
             return asyncio.run(login())
         dash = Dashboard(args.chat_id)
+        dash.telemetry_path = STATE / 'progress.json'
         dash.phase = 'Caricamento del client Telegram su Oracle'
         with dash.live():
             dash.draw(True)

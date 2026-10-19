@@ -125,6 +125,10 @@ def _connect_db(db_path: Path) -> sqlite3.Connection:
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA foreign_keys=ON")
     con.execute("PRAGMA journal_mode=WAL")
+    if con.execute("PRAGMA user_version").fetchone()[0] > 6:
+        con.close()
+        raise RuntimeError("Catalog schema is newer than this engine")
+    con.execute("BEGIN IMMEDIATE")
     con.execute(
         """
         CREATE TABLE IF NOT EXISTS downloads (
@@ -1388,6 +1392,14 @@ def reindex_content(con: sqlite3.Connection, logfile: Path | None) -> tuple[int,
     return len(rows), updated, missing, failed
 
 
+def analyze_download(path, logfile):
+    path, quality = ensure_max_480(path, logfile)
+    sha = sha256_file(path)
+    metadata = ffprobe_file_metadata(path)
+    fingerprint = video_content_fingerprint(path, metadata.get('duration_ms'))
+    return path, quality, sha, metadata, fingerprint
+
+
 def download_one(args, con, candidate, logfile, summary, *, hooks=None, runtime_lock=None):
     """Shared engine: URL claim -> private download -> atomic catalog publication."""
     db = Path(con.execute('PRAGMA database_list').fetchone()[2])
@@ -1496,11 +1508,9 @@ def _download_one(args, con, candidate, logfile, summary, hooks, catalog):
             final = possible[0] if possible else None
         if final is None or not final.exists():
             raise RuntimeError("download completed but final file was not found")
-        final, quality = ensure_max_480(final, logfile)
-        sha256 = sha256_file(final)
-        file_metadata = ffprobe_file_metadata(final)
-        duration_ms = file_metadata.get("duration_ms")
-        content_fingerprint = video_content_fingerprint(final, duration_ms)
+        analyze = hooks.get('analyze', analyze_download)
+        final, quality, sha256, file_metadata, content_fingerprint = analyze(final, logfile)
+        duration_ms = file_metadata.get('duration_ms')
         with file_lock(catalog):
             duplicate = already_downloaded(con, candidate) or downloaded_by_sha256(con, sha256)
             if not duplicate and media_key:

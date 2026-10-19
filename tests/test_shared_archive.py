@@ -113,5 +113,46 @@ class SharedArchiveTests(unittest.TestCase):
             self.assertEqual({r[0] for r in con.execute('SELECT input FROM acquisition_sources')},{'x','telegram'})
             self.assertEqual(media.read_bytes(),b'old');con.close()
 
+    def test_interrupted_transfer_is_preserved_and_reused(self):
+        from subprocess import CompletedProcess
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp); output=root/'staging';output.mkdir();con=engine.connect_db(root/'catalog.sqlite')
+            candidate=engine.Candidate(None,'https://example.org/fixture',source='telegram')
+            options=argparse.Namespace(output_dir=output,dry_run=False,retry_failed=True,cookies_mode='none',firefox_profile=None)
+            metadata=lambda *a:{'title':'Fixture','ext':'mp4','url':'https://example.org/file.mp4'}
+            paths=[]
+            def failed(command, **kwargs):
+                target=Path(command[command.index('--output')+1].replace('%(ext)s','mp4'))
+                paths.append(target); target.with_suffix('.part').write_bytes(b'partial')
+                return CompletedProcess(command,1,'','fixture interruption')
+            def resumed(command, **kwargs):
+                target=Path(command[command.index('--output')+1].replace('%(ext)s','mp4'))
+                self.assertEqual(target,paths[0]);self.assertEqual(target.with_suffix('.part').read_bytes(),b'partial')
+                target.write_bytes(b'complete');target.with_suffix('.part').unlink()
+                return CompletedProcess(command,0,'','')
+            with patch.object(engine,'tool_path',return_value='fixture'), \
+                    patch.object(engine,'ensure_max_480',side_effect=lambda path,log:(path,'480p')), \
+                    patch.object(engine,'ffprobe_file_metadata',return_value={}), \
+                    patch.object(engine,'video_content_fingerprint',return_value=None):
+                summary=engine.Summary()
+                engine.download_one(options,con,candidate,None,summary,hooks={'extract_metadata':metadata,'run':failed,'log':lambda *a:None})
+                self.assertEqual(summary.failed,1)
+                self.assertTrue(paths[0].with_suffix('.part').exists())
+                summary=engine.Summary()
+                engine.download_one(options,con,candidate,None,summary,hooks={'extract_metadata':metadata,'run':resumed,'log':lambda *a:None})
+                self.assertEqual(summary.downloaded,1)
+            self.assertEqual(con.execute('SELECT count(*) FROM downloads').fetchone()[0],1);con.close()
+
+    def test_non_x_metadata_failure_does_not_call_x_fallback(self):
+        from subprocess import CompletedProcess
+        candidate=engine.Candidate(None,'https://example.org/fixture',source='telegram')
+        options=argparse.Namespace(cookies_mode='none',firefox_profile=None)
+        with patch.object(engine,'tool_path',return_value='fixture'), \
+                patch.object(engine,'run',return_value=CompletedProcess([],1,'','fixture refusal')), \
+                patch.object(engine,'extract_fxtwitter_metadata') as fallback:
+            with self.assertRaisesRegex(RuntimeError,'fixture refusal'):
+                engine.extract_metadata(options,candidate,None)
+            fallback.assert_not_called()
+
 
 if __name__ == '__main__': unittest.main()

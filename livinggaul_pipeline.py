@@ -256,7 +256,7 @@ def transfer_verified(source, final, expected_hash, expected_size, copier):
 
 
 def remote(host, action, payload=None):
-    cmd=['ssh','-F',str(Path.home()/'.ssh/config'),'-o','BatchMode=yes','-o','ConnectTimeout=15',host,'sudo','-n','-u','livinggaul','/srv/livinggaul/venv/bin/python','/srv/livinggaul/repo/livinggaul_pipeline.py',action]
+    cmd=['ssh','-F',str(Path.home()/'.ssh/config'),'-o','BatchMode=yes','-o','ConnectTimeout=15',host,'sudo','-n','-u','livinggaul','/srv/livinggaul/venv/bin/python','/srv/livinggaul/current/livinggaul_pipeline.py',action]
     result=subprocess.run(cmd,input=json.dumps(payload or {}),text=True,capture_output=True,timeout=180,check=True)
     return json.loads(result.stdout or '{}')
 

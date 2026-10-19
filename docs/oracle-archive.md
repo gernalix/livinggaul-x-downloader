@@ -6,7 +6,9 @@ placement separately. The `video_catalog` adds archive location and ACK time.
 An archived entry remains downloaded without a VM file. IDs, snapshots, static
 counters, fingerprints, duplicate links and source checks survive migration.
 
-Runtime: `/srv/livinggaul/repo`, root-owned, group-readable only by `livinggaul`;
+Runtime: immutable releases under `/srv/livinggaul/releases`, selected by
+`/srv/livinggaul/current`, root-owned and group-readable only by `livinggaul`.
+The previous `/srv/livinggaul/repo` installation remains available for rollback;
 CPython 3.12.15 under `/srv/livinggaul/runtime/python`, isolated environment
 `/srv/livinggaul/venv`, pinned dependencies in `requirements-oracle.txt`.
 System Python stays unchanged. Python installation uses Astral uv and its
