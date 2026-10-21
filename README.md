@@ -193,6 +193,7 @@ Telegram credentials stay outside this repository.
 video_downloader CHAT_ID
 video_downloader -- CHAT_ID  # usa questa forma anche per ID negativi
 video_downloader --foreground CHAT_ID  # resta nel terminale corrente
+video_downloader --status  # solo contatori numerici, senza aprire terminali o video
 ```
 
 `CHAT_ID` è un segnaposto: inserire l'ID numerico reale, positivo per un canale
@@ -217,6 +218,26 @@ Il terminale usa una sola schermata alternativa, senza accumulare vecchie
 istantanee nella cronologia. Si aggiorna anche durante il caricamento del client,
 la ricerca dei metadati e le attese del trasferimento. Alla chiusura ripristina
 il terminale e lascia visibili gli ultimi contatori.
+Ogni riga viene cancellata prima dell'aggiornamento e limitata alla larghezza
+del terminale, evitando frammenti di valori precedenti. Il download al 100%
+può essere seguito da verifica tecnica, confronto dei duplicati o conversione:
+la fase e il relativo tempo di attesa sono mostrati separatamente.
+
+Il launcher riserva un solo terminale su Fedora, anche in caso di richieste
+simultanee. Se è già aperto, restituisce `already_open` senza creare un'altra
+finestra o un altro worker. La prenotazione scade se la finestra non parte;
+l'identità del processo evita blocchi dovuti a PID riutilizzati.
+
+I contatori Fedora distinguono **video completati di questo lotto** e totali
+complessivi del catalogo. Una conferma indica l'ACK della pipeline dopo il
+trasferimento verificato, non il solo arrivo nello staging Oracle. Le cifre
+sono calcolate con query aggregate in sola lettura, senza aprire i video.
+La telemetria privata `~/.local/state/video_downloader/progress.json` (0600)
+contiene solo contatori, tempi e fasi tecniche: nessun chat_id, titolo, link,
+percorso video o identificativo del catalogo. `--status` restituisce solo campi
+numerici, non acquisisce il lock Telegram e non contatta Telegram né siti video.
+Un worker avviato prima di questo aggiornamento non produce la nuova telemetria:
+il suo monitor mostra soltanto i totali aggregati e lo stato dei servizi.
 Connessione, verifica della sessione, ricerca del canale e lettura della cronologia
 mostrano fasi distinte. Durante le attese Telegram il terminale si aggiorna ogni
 secondo; ogni operazione ha un limite di 60 secondi e produce un errore senza

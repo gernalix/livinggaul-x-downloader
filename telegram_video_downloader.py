@@ -18,7 +18,6 @@ import unicodedata
 import signal
 import sqlite3
 import subprocess
-import sys
 import threading
 import time
 from urllib.parse import urlsplit
@@ -491,8 +490,11 @@ def download(links, channel, dash, engine=None, runtime_lock=None):
             dash.percent, dash.bytes = None, 0
             dash.speed, dash.eta = None, None
             dash.draw(True)
+            before_duplicates, before_found = summary.skipped_duplicate, dash.found
             engine['download_one'](options, con, candidate, engine['log_path'](), summary,
                                    hooks=hooks, runtime_lock=runtime_lock)
+            if summary.skipped_duplicate > before_duplicates and dash.found == before_found:
+                dash.found += 1
             row = con.execute('SELECT id,duplicate_of_id,status FROM downloads WHERE original_url=?', (candidate.url,)).fetchone()
             if row:
                 identity = row['duplicate_of_id'] if row['status'] == 'skipped_duplicate' else row['id'] if row['status'] == 'downloaded' else None
