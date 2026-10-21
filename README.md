@@ -187,6 +187,13 @@ See [runtime and recovery](docs/oracle-archive.md) and
 [P4 acceptance evidence](docs/P4-task-state.md). Runtime data, video files and
 Telegram credentials stay outside this repository.
 
+Nella mini-app Comandi, **Avvia scaricamento contenuti X** avvia via SSH
+il servizio Oracle `livinggaul-download.service`. La ricevuta conferma la
+richiesta di avvio, non il completamento del download. Il servizio continua
+su Oracle dopo la chiusura della mini-app, usa il catalogo e lo staging
+esistenti e mantiene il blocco contro esecuzioni concorrenti. Il comando
+non apre i contenuti scaricati e non abilita timer.
+
 ## Download dei video linkati su Telegram
 
 ```bash
