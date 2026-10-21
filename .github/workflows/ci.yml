@@ -30,7 +30,7 @@ jobs:
       - name: Install Telegram dependencies
         run: python -m pip install -r requirements-video-downloader.txt
       - name: Compile downloader
-        run: python -m py_compile livinggaul-x-downloader telegram_video_downloader.py video_downloader
+        run: python -m py_compile livinggaul-x-downloader video_engine.py x_input.py catalog_access.py livinggaul_pipeline.py telegram_video_downloader.py video_downloader
       - name: CLI smoke test
         run: python livinggaul-x-downloader --help >/dev/null
       - name: Systemd installer syntax

@@ -40,7 +40,7 @@ class OracleCliTests(unittest.TestCase):
         self.assertEqual(code, 0)
         argv = shlex.split(call.call_args.args[0][-1])
         self.assertIn('User=livinggaul', argv)
-        self.assertIn('/home/livinggaul/runtime.lock', argv)
+        self.assertIn('/home/livinggaul/x-input.lock', argv)
         self.assertEqual(argv[-3:], ['--run', '--cookies-mode', 'none'])
 
 
