@@ -6,9 +6,9 @@
     {
       "key": "discovered_livinggaul_x_downloader",
       "host_scope": "H0001",
-      "entrypoint": "python3",
+      "entrypoint": "/home/daniele/.local/bin/livinggaul-x-downloader",
       "argv": [
-        "livinggaul-x-downloader"
+        "--start-download-service"
       ],
       "input_schema": {
         "type": "object",
@@ -18,13 +18,14 @@
       },
       "working_directory": ".",
       "prerequisites": [
-        "Owner browser session and output storage available"
+        "Accesso SSH oracle-vm disponibile da Fedora; servizio livinggaul-download.service installato su Oracle"
       ],
-      "timeout_seconds": 3600,
+      "timeout_seconds": 30,
       "idempotency": "non_idempotent",
       "risk": "high",
-      "state": "disabled",
-      "description": "Run the owner downloader; disabled pending browser, privacy, and storage review."
+      "state": "enabled",
+      "description": "Richiede l’avvio del servizio download X su Oracle, con catalogo e staging esistenti. La ricevuta conferma la richiesta di avvio, non il completamento del download; non apre i contenuti scaricati.",
+      "display_title": "Avvia scaricamento contenuti X"
     },
     {
       "key": "telegram_video_downloader",
