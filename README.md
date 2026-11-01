@@ -337,3 +337,16 @@ e il collegamento `/srv/livinggaul/current`. I nuovi processi usano il rilascio
 selezionato; quelli già avviati proseguono con il codice caricato. Un rollback
 cambia soltanto codice e unità: non ripristina un vecchio database sopra dati,
 notifiche o ACK nuovi. La copia pre-migrazione rimane privata su Oracle.
+
+### Oracle Bitwarden credential files
+
+The three Oracle pipeline units require `livinggaul-bitwarden-credentials.service`
+to complete before systemd copies native `token` and `chat` credentials. Install
+the producer unit with these templates and the existing Oracle `bws-files` runtime
+with explicit `--encoding utf8` support. It selects only `TELEGRAM_BOT_TOKEN` and
+`NOISY_TELEGRAM_CHAT_ID` from `ORACLE_TELEGRAM_ENV`; the token resolves to the already
+authorized canonical standard bot. Root-owned temporary files are mode 0600 in
+a 0700 directory under `/run`. Each new activation refreshes them; an already
+running job keeps its startup snapshot. Vault failure prevents startup instead
+of falling back to `/etc/livinggaul`. Installation does not require a download,
+source probe, notification, or deletion of the protected legacy files.
